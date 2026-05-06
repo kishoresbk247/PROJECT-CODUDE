@@ -1,0 +1,9 @@
+.about-page { padding: 60px 24px 80px; }
+.about-container { max-width: 800px; margin: 0 auto; }
+.about-title { font-size: 36px; font-weight: 800; text-align: center; margin-bottom: 16px; }
+.about-lead { font-size: 17px; color: var(--color-text-secondary); text-align: center; line-height: 1.7; margin-bottom: 48px; max-width: 600px; margin-left: auto; margin-right: auto; }
+.about-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+.about-card { padding: 28px; border-radius: var(--radius-lg); transition: all var(--transition-normal); }
+.about-card:hover { transform: translateY(-4px); border-color: rgba(99,102,241,0.15); }
+.about-card h3 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
+.about-card p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.7; }
