@@ -1,17 +1,27 @@
 """
-CoDude — Route Tests (Day 02)
+CoDude — Route Tests (Day 02 + Day 04)
 
-Tests the health, version, and review stub endpoints using
+Tests the health, version, and review endpoints using
 pytest + httpx async client against the FastAPI test client.
+
+The full review endpoint (POST /api/v1/review) is tested with a mocked
+ReviewService so we never hit the real OpenAI API in CI.
 
 Run:
     pytest backend/tests/ -v
 """
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.models.review import (
+    BugFinding,
+    CodeReviewResponse,
+    ComplexityResult,
+)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -23,6 +33,29 @@ async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+def _mock_review_response() -> CodeReviewResponse:
+    """Build a realistic mock response for the full review endpoint."""
+    return CodeReviewResponse(
+        bugs=[
+            BugFinding(
+                line=3,
+                severity="low",
+                message="Function lacks type hints.",
+                suggestion="Add type hints: def add(a: int, b: int) -> int:",
+            ),
+        ],
+        security=[],
+        complexity=ComplexityResult(
+            time_complexity="O(1)",
+            space_complexity="O(1)",
+            explanation="Simple arithmetic operation.",
+            brute_force_alternative=None,
+        ),
+        summary="Clean utility function with minor style improvements.",
+        overall_score=92,
+    )
 
 
 # ── Health & Version Tests ───────────────────────────────────────────────────
@@ -49,7 +82,7 @@ async def test_version_endpoint(client):
     assert data["service"] == "codude"
 
 
-# ── Review Stub Tests ────────────────────────────────────────────────────────
+# ── Review Tests ─────────────────────────────────────────────────────────────
 
 SAMPLE_PAYLOAD = {
     "code": "def add(a, b):\n    return a + b",
@@ -61,7 +94,15 @@ SAMPLE_PAYLOAD = {
 @pytest.mark.anyio
 async def test_review_full(client):
     """POST /api/v1/review should return 200 with a complete review response."""
-    response = await client.post("/api/v1/review", json=SAMPLE_PAYLOAD)
+    mock_response = _mock_review_response()
+
+    with patch(
+        "app.routers.review._review_service.review",
+        new_callable=AsyncMock,
+        return_value=mock_response,
+    ):
+        response = await client.post("/api/v1/review", json=SAMPLE_PAYLOAD)
+
     assert response.status_code == 200
     data = response.json()
 
