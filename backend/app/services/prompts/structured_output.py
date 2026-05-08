@@ -1,21 +1,22 @@
 """
-CoDude — Structured Output Schema for LLM Responses
+CoDude — Structured Output Schemas for LLM Responses (Day 05 Update)
 
-Defines the Pydantic model that LangChain's .with_structured_output()
-uses to constrain the LLM's response format.
+Defines Pydantic models used by LangChain's .with_structured_output() to
+constrain the LLM's response format.
 
-This schema mirrors the CodeReviewResponse shape from app.models.review,
-but is defined separately because LangChain's structured output requires
-models with specific Field descriptions that map to the function-calling
-schema sent to OpenAI.
+Day 05 changes:
+    - Added BugDetectionSchema (for bug-only chain)
+    - Added SecurityReviewSchema (for security-only chain)
+    - Added ComplexityAnalysisSchema (for complexity-only chain)
+    - Kept CodeReviewSchema for backward compatibility
 
-The LLM will ALWAYS return data matching this shape — no manual JSON
+The LLM will ALWAYS return data matching these shapes — no manual JSON
 parsing, no regex extraction, no retry-on-parse-failure loops.
 
 How it works under the hood:
-    1. LangChain converts this Pydantic model into an OpenAI function schema
+    1. LangChain converts the Pydantic model into an OpenAI function schema
     2. The LLM is forced to call that function with valid arguments
-    3. LangChain parses the function call arguments back into this model
+    3. LangChain parses the function call arguments back into the model
     4. We get a validated Pydantic instance, guaranteed to match the schema
 """
 
@@ -23,6 +24,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+
+# ── Shared Sub-Schemas ───────────────────────────────────────────────────────
 
 class BugFindingSchema(BaseModel):
     """Schema for a single bug finding in the LLM response."""
@@ -62,20 +65,72 @@ class ComplexitySchema(BaseModel):
         ..., description="Space complexity in Big-O notation (e.g. 'O(n)')"
     )
     explanation: str = Field(
-        ..., description="Explanation of why the code has this complexity"
+        ..., description="Step-by-step explanation of the complexity derivation"
     )
-    brute_force_alternative: Optional[str] = Field(
+    suggestion: Optional[str] = Field(
         None,
-        description="Alternative brute-force approach complexity for comparison",
+        description="Suggested optimal alternative if the current solution is suboptimal, null if already optimal",
     )
 
+
+# ── Specialized Schemas (Day 05 — one per parallel chain) ────────────────────
+
+class BugDetectionSchema(BaseModel):
+    """
+    Structured output for the bug-detection-only chain.
+
+    The LLM returns a list of bugs. If no bugs are found, the list is empty.
+    """
+
+    bugs: list[BugFindingSchema] = Field(
+        default_factory=list, description="List of bugs found in the code"
+    )
+
+
+class SecurityReviewSchema(BaseModel):
+    """
+    Structured output for the security-review-only chain.
+
+    The LLM returns a list of security findings. If no vulnerabilities
+    are found, the list is empty.
+    """
+
+    security: list[SecurityFindingSchema] = Field(
+        default_factory=list,
+        description="List of security vulnerabilities found",
+    )
+
+
+class ComplexityAnalysisSchema(BaseModel):
+    """
+    Structured output for the complexity-analysis-only chain.
+
+    The LLM returns a single complexity analysis object.
+    """
+
+    time_complexity: str = Field(
+        ..., description="Time complexity in Big-O notation (e.g. 'O(n²)')"
+    )
+    space_complexity: str = Field(
+        ..., description="Space complexity in Big-O notation (e.g. 'O(n)')"
+    )
+    explanation: str = Field(
+        ..., description="Step-by-step explanation of the complexity derivation"
+    )
+    suggestion: Optional[str] = Field(
+        None,
+        description="Suggested optimal alternative if suboptimal, null if already optimal",
+    )
+
+
+# ── Legacy Combined Schema (backward compatible with Day 04) ────────────────
 
 class CodeReviewSchema(BaseModel):
     """
-    Top-level structured output schema for the code review LLM chain.
+    Top-level structured output schema for the combined code review chain.
 
-    This is the schema passed to llm.with_structured_output() so the
-    LLM is forced to respond in exactly this shape.
+    Kept for backward compatibility. Day 05's ReviewService uses the
+    specialized schemas above and merges results.
     """
 
     bugs: list[BugFindingSchema] = Field(

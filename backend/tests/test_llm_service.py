@@ -1,16 +1,21 @@
 """
-CoDude — LLM Service Tests
+CoDude — LLM Service & Review Service Tests (Day 05 Update)
 
 Tests the LangChain integration WITHOUT hitting the real OpenAI API.
 Uses unittest.mock to patch ChatOpenAI so tests are fast, free, and
 deterministic.
 
+Day 05 updates:
+    - Updated ReviewService tests for the new parallel chain architecture
+    - Added tests for _merge_results, _compute_score, _synthesise_summary
+    - Tests use the new specialized schemas (BugDetectionSchema, etc.)
+
 Key testing strategy:
     - Mock the LLM's .ainvoke() to return a fake AIMessage
     - Mock .with_structured_output() to return a runnable that produces
-      a fake CodeReviewSchema
+      fake specialized schemas
     - Verify the full chain executes without errors
-    - Verify the ReviewService correctly maps LLM output to API models
+    - Verify the ReviewService correctly merges parallel chain outputs
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,9 +24,13 @@ import pytest
 
 from app.services.llm_service import LLMService
 from app.services.prompts.structured_output import (
+    BugDetectionSchema,
     BugFindingSchema,
     CodeReviewSchema,
+    ComplexityAnalysisSchema,
     ComplexitySchema,
+    SecurityFindingSchema,
+    SecurityReviewSchema,
 )
 from app.services.review_service import ReviewService
 from app.models.review import CodeReviewRequest
@@ -31,8 +40,61 @@ from app.models.review import CodeReviewRequest
 
 
 @pytest.fixture
+def mock_bug_result() -> BugDetectionSchema:
+    """Create a mock bug detection result."""
+    return BugDetectionSchema(
+        bugs=[
+            BugFindingSchema(
+                line=5,
+                severity="medium",
+                message="Unused variable 'temp'.",
+                suggestion="Remove the unused variable.",
+            ),
+        ]
+    )
+
+
+@pytest.fixture
+def mock_security_result() -> SecurityReviewSchema:
+    """Create a mock security review result."""
+    return SecurityReviewSchema(
+        security=[
+            SecurityFindingSchema(
+                line=10,
+                severity="critical",
+                message="SQL injection via string interpolation.",
+                suggestion="Use parameterized queries.",
+                owasp_category="A03:2021 – Injection",
+            ),
+        ]
+    )
+
+
+@pytest.fixture
+def mock_complexity_result() -> ComplexityAnalysisSchema:
+    """Create a mock complexity analysis result."""
+    return ComplexityAnalysisSchema(
+        time_complexity="O(n²)",
+        space_complexity="O(1)",
+        explanation="Nested loop over the input array.",
+        suggestion="Use a hash map to reduce to O(n).",
+    )
+
+
+@pytest.fixture
+def mock_complexity_result_optimal() -> ComplexityAnalysisSchema:
+    """Create a mock complexity result for optimal code."""
+    return ComplexityAnalysisSchema(
+        time_complexity="O(n)",
+        space_complexity="O(n)",
+        explanation="Single pass with hash set lookups.",
+        suggestion=None,
+    )
+
+
+@pytest.fixture
 def mock_schema() -> CodeReviewSchema:
-    """Create a realistic mock CodeReviewSchema for testing."""
+    """Create a realistic mock CodeReviewSchema for legacy tests."""
     return CodeReviewSchema(
         bugs=[
             BugFindingSchema(
@@ -47,7 +109,7 @@ def mock_schema() -> CodeReviewSchema:
             time_complexity="O(n²)",
             space_complexity="O(1)",
             explanation="Nested loop over the input array.",
-            brute_force_alternative=None,
+            suggestion=None,
         ),
         summary="Code has minor issues. One unused variable found.",
         overall_score=78,
@@ -102,66 +164,105 @@ class TestLLMService:
 
 @pytest.mark.asyncio
 class TestReviewService:
-    """Tests for the ReviewService that composes the full LCEL chain."""
+    """Tests for the ReviewService with parallel specialized chains (Day 05)."""
 
-    @patch("app.services.review_service.LLMService")
-    async def test_review_returns_code_review_response(
+    def test_merge_results_maps_correctly(
         self,
-        mock_llm_service_cls: MagicMock,
-        mock_schema: CodeReviewSchema,
+        mock_bug_result: BugDetectionSchema,
+        mock_security_result: SecurityReviewSchema,
+        mock_complexity_result: ComplexityAnalysisSchema,
     ) -> None:
         """
-        review() should invoke the chain and return a valid
-        CodeReviewResponse mapped from the LLM's structured output.
+        _merge_results should correctly map all three chain outputs
+        into a single CodeReviewResponse.
         """
-        # Arrange: mock the LLM service and its structured output chain
-        mock_llm_instance = MagicMock()
-        mock_llm_service_cls.return_value = mock_llm_instance
-
-        # The structured output runnable should return our mock schema
-        mock_structured_runnable = AsyncMock(return_value=mock_schema)
-        mock_llm_instance.with_structured_output.return_value = (
-            mock_structured_runnable
+        response = ReviewService._merge_results(
+            mock_bug_result, mock_security_result, mock_complexity_result
         )
 
-        # Build the service (chain is constructed in __init__)
-        service = ReviewService()
-
-        # Create a test request
-        request = CodeReviewRequest(
-            code="def bubble_sort(arr):\n    for i in range(len(arr)):\n        for j in range(len(arr)-1):\n            if arr[j] > arr[j+1]:\n                arr[j], arr[j+1] = arr[j+1], arr[j]",
-            language="python",
-            filename="sort.py",
-        )
-
-        # Act: invoke the chain
-        # We need to mock the chain's ainvoke since it's composed with |
-        # The chain is CODE_REVIEW_PROMPT | structured_runnable
-        # Let's directly test _to_response instead for unit purity
-        response = ReviewService._to_response(mock_schema)
-
-        # Assert: verify the mapping is correct
-        assert response.overall_score == 78
+        # Verify bugs are mapped
         assert len(response.bugs) == 1
         assert response.bugs[0].severity == "medium"
         assert response.bugs[0].line == 5
-        assert len(response.security) == 0
+
+        # Verify security findings are mapped
+        assert len(response.security) == 1
+        assert response.security[0].severity == "critical"
+        assert response.security[0].owasp_category == "A03:2021 – Injection"
+
+        # Verify complexity is mapped
         assert response.complexity is not None
         assert response.complexity.time_complexity == "O(n²)"
-        assert response.summary == "Code has minor issues. One unused variable found."
+        assert response.complexity.space_complexity == "O(1)"
+        assert response.complexity.brute_force_alternative == "Use a hash map to reduce to O(n)."
 
-    def test_to_response_with_no_complexity(self) -> None:
-        """_to_response should handle None complexity gracefully."""
-        schema = CodeReviewSchema(
-            bugs=[],
-            security=[],
-            complexity=None,
-            summary="Clean code.",
-            overall_score=95,
+    def test_merge_results_clean_code(
+        self,
+        mock_complexity_result_optimal: ComplexityAnalysisSchema,
+    ) -> None:
+        """_merge_results should handle clean code (no bugs, no security)."""
+        bug_result = BugDetectionSchema(bugs=[])
+        security_result = SecurityReviewSchema(security=[])
+
+        response = ReviewService._merge_results(
+            bug_result, security_result, mock_complexity_result_optimal
         )
 
-        response = ReviewService._to_response(schema)
+        assert len(response.bugs) == 0
+        assert len(response.security) == 0
+        assert response.overall_score == 100
+        assert "No bugs detected" in response.summary
+        assert "No security vulnerabilities" in response.summary
 
-        assert response.complexity is None
-        assert response.overall_score == 95
-        assert response.summary == "Clean code."
+    def test_compute_score_perfect(self) -> None:
+        """Score should be 100 for code with no findings."""
+        assert ReviewService._compute_score([], []) == 100
+
+    def test_compute_score_critical_findings(
+        self,
+        mock_bug_result: BugDetectionSchema,
+        mock_security_result: SecurityReviewSchema,
+    ) -> None:
+        """Score should decrease based on finding severity."""
+        from app.models.review import BugFinding, SecurityFinding
+
+        bugs = [
+            BugFinding(line=5, severity="medium", message="test", suggestion="fix")
+        ]
+        security = [
+            SecurityFinding(
+                line=10, severity="critical", message="test",
+                suggestion="fix", owasp_category="A03:2021"
+            )
+        ]
+
+        score = ReviewService._compute_score(bugs, security)
+        # 100 - 8 (medium) - 20 (critical) = 72
+        assert score == 72
+
+    def test_compute_score_minimum_is_zero(self) -> None:
+        """Score should never go below 0."""
+        from app.models.review import BugFinding
+
+        many_bugs = [
+            BugFinding(line=i, severity="critical", message="bug", suggestion="fix")
+            for i in range(10)
+        ]
+        score = ReviewService._compute_score(many_bugs, [])
+        assert score == 0
+
+    def test_synthesise_summary_with_findings(
+        self,
+        mock_bug_result: BugDetectionSchema,
+        mock_security_result: SecurityReviewSchema,
+        mock_complexity_result: ComplexityAnalysisSchema,
+    ) -> None:
+        """Summary should mention bugs, security, and complexity."""
+        response = ReviewService._merge_results(
+            mock_bug_result, mock_security_result, mock_complexity_result
+        )
+
+        assert "1 bug(s)" in response.summary
+        assert "1 security issue(s)" in response.summary
+        assert "O(n²)" in response.summary
+        assert "optimised alternative" in response.summary.lower()
