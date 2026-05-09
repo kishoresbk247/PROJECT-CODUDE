@@ -15,8 +15,9 @@ Routes:
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from app.middleware.rate_limiter import limiter
 from app.models.review import (
     BugFinding,
     CodeReviewRequest,
@@ -94,7 +95,8 @@ def _mock_complexity() -> ComplexityResult:
     summary="Full code review",
     description="Analyses code for bugs, security vulnerabilities, and complexity using GPT-4o-mini.",
 )
-async def review_code(request: CodeReviewRequest) -> CodeReviewResponse:
+@limiter.limit("10/minute")
+async def review_code(request: Request, review_request: CodeReviewRequest) -> CodeReviewResponse:
     """
     Full AI-powered code review endpoint.
 
@@ -105,10 +107,10 @@ async def review_code(request: CodeReviewRequest) -> CodeReviewResponse:
     try:
         logger.info(
             "Starting AI review for %s code (%d chars)",
-            request.language,
-            len(request.code),
+            review_request.language,
+            len(review_request.code),
         )
-        response = await _review_service.review(request)
+        response = await _review_service.review(review_request)
         logger.info(
             "AI review complete — score: %d, bugs: %d, security: %d",
             response.overall_score,

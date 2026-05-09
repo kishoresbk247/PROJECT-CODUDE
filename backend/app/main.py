@@ -1,8 +1,9 @@
 """
-CoDude — Main FastAPI Application
+CoDude — Main FastAPI Application (Day 06 — Rate Limiting)
 
 Central application factory that wires together:
     - CORS middleware (allows frontend at localhost:3000)
+    - Rate limiting via slowapi (10 req/min per IP on /review)
     - Global exception handlers (HTTPException + unhandled errors)
     - Health / version router  (GET /health, GET /api/v1/version)
     - Review router            (POST /api/v1/review/*)
@@ -17,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.middleware.rate_limiter import setup_rate_limiter
 from app.routers import health, review
 
 # ── Application Instance ─────────────────────────────────────────────────────
@@ -24,10 +26,17 @@ from app.routers import health, review
 app = FastAPI(
     title="CoDude API",
     description="AI-powered code review assistant backend",
-    version="0.2.0",
+    version="0.3.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+
+# ── Rate Limiting ───────────────────────────────────────────────────────────
+# Must be set up before CORS middleware so the limiter state is available.
+# See backend/app/middleware/rate_limiter.py for configuration details.
+
+setup_rate_limiter(app)
 
 
 # ── CORS Middleware ──────────────────────────────────────────────────────────

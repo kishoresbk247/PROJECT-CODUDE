@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = "sk-placeholder"
     APP_ENV: str = "development"
     APP_PORT: int = 8000
+    REDIS_URL: str = "redis://localhost:6379/0"
 
 
 # Singleton instance — import this across modules

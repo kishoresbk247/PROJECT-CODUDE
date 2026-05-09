@@ -1,5 +1,5 @@
 """
-CoDude — LLM Service
+CoDude — LLM Service (Day 06 — Retry Logic)
 
 Base service class that wraps LangChain's ChatOpenAI integration.
 Provides the foundation for all AI-powered features in CoDude.
@@ -16,17 +16,35 @@ Model choice: gpt-4o-mini
     - Best cost/performance ratio for code review tasks.
     - Supports structured output (function calling) natively.
     - Temperature=0 for deterministic, reproducible reviews.
+
+Day 06 additions:
+    - tenacity @retry decorator on invoke() and ainvoke() calls
+    - Retries up to 3 times on RateLimitError or APIConnectionError
+    - Exponential backoff starting at 2 seconds (2s → 4s → 8s)
+    - Logs each retry attempt for observability
 """
 
+import logging
+
+import openai
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+)
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMService:
     """
-    Thin wrapper around LangChain's ChatOpenAI.
+    Thin wrapper around LangChain's ChatOpenAI with retry logic.
 
     Usage:
         llm_service = LLMService()
@@ -48,9 +66,21 @@ class LLMService:
             api_key=settings.OPENAI_API_KEY,
         )
 
+    @retry(
+        retry=retry_if_exception_type(
+            (openai.RateLimitError, openai.APIConnectionError)
+        ),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=16),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     async def invoke(self, prompt: str) -> str:
         """
         Send a plain-text prompt to the LLM and return the text response.
+
+        Retries up to 3 times on OpenAI rate-limit or connection errors
+        with exponential backoff (2s → 4s → 8s).
 
         Args:
             prompt: The user prompt string.

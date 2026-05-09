@@ -1,5 +1,5 @@
 """
-CoDude — Review Service (Day 05 — Parallel Specialized Chains)
+CoDude — Review Service (Day 06 — Caching Layer)
 
 Orchestrates three parallel AI review chains using asyncio.gather():
 
@@ -7,11 +7,12 @@ Orchestrates three parallel AI review chains using asyncio.gather():
     2. Security Review   — SECURITY_REVIEW_PROMPT | llm(SecurityReviewSchema)
     3. Complexity Analysis — COMPLEXITY_ANALYSIS_PROMPT | llm(ComplexityAnalysisSchema)
 
-Day 05 improvements over Day 04:
-    - Single monolithic prompt → three specialized prompts
-    - Sequential execution → parallel execution with asyncio.gather()
-    - Zero-shot prompting → few-shot + chain-of-thought prompting
-    - Better hallucination control (explicit null-return instructions)
+Day 06 additions over Day 05:
+    - Redis-based response caching via CacheService
+    - Cache key = sha256(code + language) for deduplication
+    - Cache HIT → return instantly (skip all three LLM chains)
+    - Cache MISS → run chains, store result, return
+    - Logging of cache hit/miss for observability
 
 Architecture:
     Each chain is an LCEL pipeline: prompt | llm.with_structured_output(schema)
@@ -29,6 +30,7 @@ from app.models.review import (
     ComplexityResult,
     SecurityFinding,
 )
+from app.services.cache_service import CacheService
 from app.services.llm_service import LLMService
 from app.services.prompts.bug_detection import BUG_DETECTION_PROMPT
 from app.services.prompts.complexity_analysis import COMPLEXITY_ANALYSIS_PROMPT
@@ -46,8 +48,8 @@ class ReviewService:
     """
     High-level service for AI-powered code reviews.
 
-    Day 05: Runs three specialized LLM chains in parallel and merges
-    the results into a single CodeReviewResponse.
+    Day 06: Adds Redis caching around the parallel LLM chains.
+    On a cache hit, the LLM is never called — instant response.
 
     Usage:
         service = ReviewService()
@@ -55,8 +57,9 @@ class ReviewService:
     """
 
     def __init__(self) -> None:
-        """Initialise the LLM service and build three LCEL chains."""
+        """Initialise the LLM service, cache service, and LCEL chains."""
         self._llm_service = LLMService()
+        self._cache = CacheService()
 
         # ── Specialized LCEL Chains ──────────────────────────────────────
         # Each chain: prompt | llm_with_structured_output(schema)
@@ -79,11 +82,14 @@ class ReviewService:
 
     async def review(self, request: CodeReviewRequest) -> CodeReviewResponse:
         """
-        Run a full AI code review using three parallel specialized chains.
+        Run a full AI code review with Redis caching.
 
-        Uses asyncio.gather() to run bug detection, security review, and
-        complexity analysis concurrently. This reduces total latency from
-        ~3x a single call to ~1x (wall-clock time of the slowest chain).
+        Flow:
+            1. Generate cache key from sha256(code + language)
+            2. Check Redis for a cached response
+            3. On HIT → deserialise and return immediately
+            4. On MISS → run all three LLM chains in parallel
+            5. Merge results, cache the response, return
 
         Args:
             request: The client's code review request containing
@@ -93,16 +99,26 @@ class ReviewService:
             A CodeReviewResponse with bugs, security findings,
             complexity analysis, summary, and overall score.
         """
+        # ── Step 1: Build cache key ──────────────────────────────────────
+        cache_key = CacheService.make_key(request.code, request.language)
+
+        # ── Step 2: Check cache ──────────────────────────────────────────
+        cached_data = await self._cache.get(cache_key)
+        if cached_data is not None:
+            logger.info("✅ Cache HIT — returning cached review")
+            return CodeReviewResponse(**cached_data)
+
+        # ── Step 3: Cache MISS — run LLM chains ─────────────────────────
+        logger.info(
+            "❌ Cache MISS — running parallel LLM review — language=%s, code_length=%d",
+            request.language,
+            len(request.code),
+        )
+
         chain_input = {
             "language": request.language,
             "code": request.code,
         }
-
-        logger.info(
-            "Starting parallel review — language=%s, code_length=%d",
-            request.language,
-            len(request.code),
-        )
 
         # Run all three chains in parallel
         bug_result, security_result, complexity_result = await asyncio.gather(
@@ -117,8 +133,14 @@ class ReviewService:
             len(security_result.security),
         )
 
-        # Merge results into a unified response
-        return self._merge_results(bug_result, security_result, complexity_result)
+        # ── Step 4: Merge results ────────────────────────────────────────
+        response = self._merge_results(bug_result, security_result, complexity_result)
+
+        # ── Step 5: Cache the response ───────────────────────────────────
+        await self._cache.set(cache_key, response.model_dump(), ttl=3600)
+        logger.info("📦 Cached review response — TTL=3600s")
+
+        return response
 
     @staticmethod
     def _merge_results(
