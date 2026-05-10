@@ -71,6 +71,9 @@ class BugFinding(BaseModel):
     )
     message: str = Field(..., description="Description of the bug")
     suggestion: str = Field(..., description="Suggested fix")
+    source: Literal["static", "llm"] = Field(
+        "llm", description="Detection source: 'static' (AST) or 'llm' (AI)"
+    )
 
 
 class SecurityFinding(BaseModel):

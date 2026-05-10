@@ -1,23 +1,29 @@
 """
-CoDude — Review Service (Day 06 — Caching Layer)
+CoDude — Review Service (Day 07 — Static Analysis Layer)
 
-Orchestrates three parallel AI review chains using asyncio.gather():
+Orchestrates both static analysis and AI-powered review:
 
-    1. Bug Detection     — BUG_DETECTION_PROMPT | llm(BugDetectionSchema)
-    2. Security Review   — SECURITY_REVIEW_PROMPT | llm(SecurityReviewSchema)
-    3. Complexity Analysis — COMPLEXITY_ANALYSIS_PROMPT | llm(ComplexityAnalysisSchema)
+    Static Analysis (Python only — no API call):
+        1. ASTAnalyzer       — mutable defaults, bare excepts, None comparison, unused vars
+        2. ComplexityChecker  — cyclomatic complexity > 10
+        3. StyleChecker       — snake_case, function length, docstrings
 
-Day 06 additions over Day 05:
-    - Redis-based response caching via CacheService
-    - Cache key = sha256(code + language) for deduplication
-    - Cache HIT → return instantly (skip all three LLM chains)
-    - Cache MISS → run chains, store result, return
-    - Logging of cache hit/miss for observability
+    LLM Analysis (all languages):
+        1. Bug Detection     — BUG_DETECTION_PROMPT | llm(BugDetectionSchema)
+        2. Security Review   — SECURITY_REVIEW_PROMPT | llm(SecurityReviewSchema)
+        3. Complexity Analysis — COMPLEXITY_ANALYSIS_PROMPT | llm(ComplexityAnalysisSchema)
+
+Day 07 additions over Day 06:
+    - AST-based static analysis runs BEFORE the LLM call (Python only)
+    - Static findings are tagged with source="static"
+    - LLM findings are tagged with source="llm"
+    - Both are merged into the final response
+    - Language guard: non-Python code skips static analysis entirely
 
 Architecture:
-    Each chain is an LCEL pipeline: prompt | llm.with_structured_output(schema)
-    All three chains run concurrently, and results are merged into a single
-    CodeReviewResponse with a synthesized summary and score.
+    Static analysis is synchronous and instant (< 10ms).
+    LLM chains are async and run concurrently via asyncio.gather().
+    Static findings appear first in the bugs list.
 """
 
 import asyncio
@@ -40,6 +46,7 @@ from app.services.prompts.structured_output import (
     ComplexityAnalysisSchema,
     SecurityReviewSchema,
 )
+from app.services.static_analysis import ASTAnalyzer, ComplexityChecker, StyleChecker
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +55,9 @@ class ReviewService:
     """
     High-level service for AI-powered code reviews.
 
-    Day 06: Adds Redis caching around the parallel LLM chains.
-    On a cache hit, the LLM is never called — instant response.
+    Day 07: Adds AST-based static analysis before the LLM call.
+    Python code gets instant static findings + LLM findings.
+    Non-Python code gets LLM-only analysis.
 
     Usage:
         service = ReviewService()
@@ -57,9 +65,14 @@ class ReviewService:
     """
 
     def __init__(self) -> None:
-        """Initialise the LLM service, cache service, and LCEL chains."""
+        """Initialise the LLM service, cache service, static analyzers, and LCEL chains."""
         self._llm_service = LLMService()
         self._cache = CacheService()
+
+        # ── Static Analyzers (Python only, no API call) ──────────────────
+        self._ast_analyzer = ASTAnalyzer()
+        self._complexity_checker = ComplexityChecker()
+        self._style_checker = StyleChecker()
 
         # ── Specialized LCEL Chains ──────────────────────────────────────
         # Each chain: prompt | llm_with_structured_output(schema)
@@ -82,14 +95,16 @@ class ReviewService:
 
     async def review(self, request: CodeReviewRequest) -> CodeReviewResponse:
         """
-        Run a full AI code review with Redis caching.
+        Run a full code review with static analysis + LLM + Redis caching.
 
         Flow:
             1. Generate cache key from sha256(code + language)
             2. Check Redis for a cached response
             3. On HIT → deserialise and return immediately
-            4. On MISS → run all three LLM chains in parallel
-            5. Merge results, cache the response, return
+            4. On MISS →
+               a. Run static analysis (Python only, instant)
+               b. Run all three LLM chains in parallel
+               c. Merge static + LLM results, cache, return
 
         Args:
             request: The client's code review request containing
@@ -108,13 +123,22 @@ class ReviewService:
             logger.info("✅ Cache HIT — returning cached review")
             return CodeReviewResponse(**cached_data)
 
-        # ── Step 3: Cache MISS — run LLM chains ─────────────────────────
+        # ── Step 3: Cache MISS — run analysis ────────────────────────────
         logger.info(
-            "❌ Cache MISS — running parallel LLM review — language=%s, code_length=%d",
+            "❌ Cache MISS — running review — language=%s, code_length=%d",
             request.language,
             len(request.code),
         )
 
+        # ── Step 3a: Static Analysis (Python only) ───────────────────────
+        static_bugs = self._run_static_analysis(request.code, request.language)
+        if static_bugs:
+            logger.info(
+                "🔍 Static analysis found %d issue(s) — source=static",
+                len(static_bugs),
+            )
+
+        # ── Step 3b: LLM Analysis (all languages) ───────────────────────
         chain_input = {
             "language": request.language,
             "code": request.code,
@@ -134,7 +158,9 @@ class ReviewService:
         )
 
         # ── Step 4: Merge results ────────────────────────────────────────
-        response = self._merge_results(bug_result, security_result, complexity_result)
+        response = self._merge_results(
+            bug_result, security_result, complexity_result, static_bugs
+        )
 
         # ── Step 5: Cache the response ───────────────────────────────────
         await self._cache.set(cache_key, response.model_dump(), ttl=3600)
@@ -142,28 +168,71 @@ class ReviewService:
 
         return response
 
+    def _run_static_analysis(self, code: str, language: str) -> list[BugFinding]:
+        """
+        Run all static analyzers on Python code.
+
+        Language guard: returns an empty list for non-Python code,
+        falling through to LLM-only analysis.
+
+        Args:
+            code: The source code to analyze.
+            language: Programming language of the code.
+
+        Returns:
+            List of BugFinding objects with source="static".
+        """
+        if language.lower() != "python":
+            logger.debug("Skipping static analysis — language=%s (not Python)", language)
+            return []
+
+        findings: list[BugFinding] = []
+
+        # Run all three analyzers
+        for analyzer_finding in (
+            self._ast_analyzer.analyze(code)
+            + self._complexity_checker.analyze(code)
+            + self._style_checker.analyze(code)
+        ):
+            findings.append(
+                BugFinding(
+                    line=analyzer_finding.line,
+                    severity=analyzer_finding.severity,
+                    message=analyzer_finding.message,
+                    suggestion=analyzer_finding.suggestion,
+                    source="static",
+                )
+            )
+
+        return findings
+
     @staticmethod
     def _merge_results(
         bug_result: BugDetectionSchema,
         security_result: SecurityReviewSchema,
         complexity_result: ComplexityAnalysisSchema,
+        static_bugs: list[BugFinding] | None = None,
     ) -> CodeReviewResponse:
         """
-        Merge outputs from three specialized chains into a single response.
+        Merge outputs from static analysis and three LLM chains into a single response.
 
-        Synthesises a summary and computes an overall score based on the
-        number and severity of findings.
+        Static findings appear first (source="static"), followed by LLM findings
+        (source="llm"). This ordering reflects their detection priority.
         """
-        # Map LLM schemas to API response models
-        bugs = [
+        # Map LLM schemas to API response models (tagged source="llm")
+        llm_bugs = [
             BugFinding(
                 line=b.line,
                 severity=b.severity,
                 message=b.message,
                 suggestion=b.suggestion,
+                source="llm",
             )
             for b in bug_result.bugs
         ]
+
+        # Combine static + LLM bugs (static first)
+        all_bugs = (static_bugs or []) + llm_bugs
 
         security = [
             SecurityFinding(
@@ -184,13 +253,13 @@ class ReviewService:
         )
 
         # Compute overall score based on findings
-        score = ReviewService._compute_score(bugs, security)
+        score = ReviewService._compute_score(all_bugs, security)
 
         # Synthesise summary from findings
-        summary = ReviewService._synthesise_summary(bugs, security, complexity)
+        summary = ReviewService._synthesise_summary(all_bugs, security, complexity)
 
         return CodeReviewResponse(
-            bugs=bugs,
+            bugs=all_bugs,
             security=security,
             complexity=complexity,
             summary=summary,
@@ -237,13 +306,23 @@ class ReviewService:
         """
         parts = []
 
-        # Bug summary
+        # Bug summary (broken down by source)
         if bugs:
+            static_count = sum(1 for b in bugs if b.source == "static")
+            llm_count = sum(1 for b in bugs if b.source == "llm")
             critical_bugs = sum(1 for b in bugs if b.severity == "critical")
             high_bugs = sum(1 for b in bugs if b.severity == "high")
+
+            source_detail = []
+            if static_count:
+                source_detail.append(f"{static_count} static")
+            if llm_count:
+                source_detail.append(f"{llm_count} AI")
+
             parts.append(
                 f"Found {len(bugs)} bug(s)"
-                + (f" ({critical_bugs} critical, {high_bugs} high)" if critical_bugs or high_bugs else "")
+                + (f" ({', '.join(source_detail)})" if source_detail else "")
+                + (f" — {critical_bugs} critical, {high_bugs} high" if critical_bugs or high_bugs else "")
                 + "."
             )
         else:
