@@ -1,27 +1,25 @@
 """
-CoDude — Review Service (Day 07 — Static Analysis Layer)
+CoDude — Review Service (Day 08 — Multi-Language Static Analysis)
 
 Orchestrates both static analysis and AI-powered review:
 
-    Static Analysis (Python only — no API call):
-        1. ASTAnalyzer       — mutable defaults, bare excepts, None comparison, unused vars
-        2. ComplexityChecker  — cyclomatic complexity > 10
-        3. StyleChecker       — snake_case, function length, docstrings
+    Static Analysis (no API call):
+        Python:        ASTAnalyzer, ComplexityChecker, StyleChecker (AST-based)
+        JavaScript:    PatternMatcher with regex patterns (Day 08)
+        Java:          PatternMatcher with regex patterns (Day 08)
 
     LLM Analysis (all languages):
         1. Bug Detection     — BUG_DETECTION_PROMPT | llm(BugDetectionSchema)
         2. Security Review   — SECURITY_REVIEW_PROMPT | llm(SecurityReviewSchema)
         3. Complexity Analysis — COMPLEXITY_ANALYSIS_PROMPT | llm(ComplexityAnalysisSchema)
 
-Day 07 additions over Day 06:
-    - AST-based static analysis runs BEFORE the LLM call (Python only)
-    - Static findings are tagged with source="static"
-    - LLM findings are tagged with source="llm"
-    - Both are merged into the final response
-    - Language guard: non-Python code skips static analysis entirely
+Day 08 additions over Day 07:
+    - PatternMatcher provides regex-based static analysis for JS and Java
+    - LanguageDetector auto-identifies language at the router layer
+    - Non-Python languages now get static findings (regex) + LLM findings
 
 Architecture:
-    Static analysis is synchronous and instant (< 10ms).
+    Static analysis is synchronous and instant (<10ms).
     LLM chains are async and run concurrently via asyncio.gather().
     Static findings appear first in the bugs list.
 """
@@ -46,7 +44,12 @@ from app.services.prompts.structured_output import (
     ComplexityAnalysisSchema,
     SecurityReviewSchema,
 )
-from app.services.static_analysis import ASTAnalyzer, ComplexityChecker, StyleChecker
+from app.services.static_analysis import (
+    ASTAnalyzer,
+    ComplexityChecker,
+    PatternMatcher,
+    StyleChecker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +58,8 @@ class ReviewService:
     """
     High-level service for AI-powered code reviews.
 
-    Day 07: Adds AST-based static analysis before the LLM call.
-    Python code gets instant static findings + LLM findings.
-    Non-Python code gets LLM-only analysis.
+    Day 08: Adds regex-based pattern matching for JS/Java alongside
+    the existing AST analysis for Python.
 
     Usage:
         service = ReviewService()
@@ -69,10 +71,13 @@ class ReviewService:
         self._llm_service = LLMService()
         self._cache = CacheService()
 
-        # ── Static Analyzers (Python only, no API call) ──────────────────
+        # ── Static Analyzers ─────────────────────────────────────────────
+        # Python: AST-based
         self._ast_analyzer = ASTAnalyzer()
         self._complexity_checker = ComplexityChecker()
         self._style_checker = StyleChecker()
+        # JS / Java: Regex-based (Day 08)
+        self._pattern_matcher = PatternMatcher()
 
         # ── Specialized LCEL Chains ──────────────────────────────────────
         # Each chain: prompt | llm_with_structured_output(schema)
@@ -170,10 +175,11 @@ class ReviewService:
 
     def _run_static_analysis(self, code: str, language: str) -> list[BugFinding]:
         """
-        Run all static analyzers on Python code.
+        Run static analyzers appropriate for the given language.
 
-        Language guard: returns an empty list for non-Python code,
-        falling through to LLM-only analysis.
+        - Python: AST-based analyzers (ASTAnalyzer, ComplexityChecker, StyleChecker)
+        - JavaScript / Java: Regex-based PatternMatcher
+        - Other languages: returns empty list (LLM-only analysis)
 
         Args:
             code: The source code to analyze.
@@ -182,26 +188,43 @@ class ReviewService:
         Returns:
             List of BugFinding objects with source="static".
         """
-        if language.lower() != "python":
-            logger.debug("Skipping static analysis — language=%s (not Python)", language)
-            return []
-
+        lang = language.lower()
         findings: list[BugFinding] = []
 
-        # Run all three analyzers
-        for analyzer_finding in (
-            self._ast_analyzer.analyze(code)
-            + self._complexity_checker.analyze(code)
-            + self._style_checker.analyze(code)
-        ):
-            findings.append(
-                BugFinding(
-                    line=analyzer_finding.line,
-                    severity=analyzer_finding.severity,
-                    message=analyzer_finding.message,
-                    suggestion=analyzer_finding.suggestion,
-                    source="static",
+        if lang == "python":
+            # AST-based analysis (Day 07)
+            for analyzer_finding in (
+                self._ast_analyzer.analyze(code)
+                + self._complexity_checker.analyze(code)
+                + self._style_checker.analyze(code)
+            ):
+                findings.append(
+                    BugFinding(
+                        line=analyzer_finding.line,
+                        severity=analyzer_finding.severity,
+                        message=analyzer_finding.message,
+                        suggestion=analyzer_finding.suggestion,
+                        source="static",
+                    )
                 )
+        else:
+            # Regex-based analysis for JS, Java, etc. (Day 08)
+            for pf in self._pattern_matcher.match(code, lang):
+                findings.append(
+                    BugFinding(
+                        line=pf.line,
+                        severity=pf.severity,
+                        message=pf.message,
+                        suggestion=pf.suggestion,
+                        source="static",
+                    )
+                )
+
+        if findings:
+            logger.info(
+                "🔍 Static analysis found %d issue(s) for %s — source=static",
+                len(findings),
+                language,
             )
 
         return findings

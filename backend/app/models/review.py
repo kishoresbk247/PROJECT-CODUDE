@@ -44,9 +44,16 @@ class CodeReviewRequest(BaseModel):
     )
 
     code: str = Field(..., min_length=1, description="Source code to review")
-    language: str = Field(..., min_length=1, description="Programming language")
+    language: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            'Programming language (e.g. "python", "javascript", "java"). '
+            'Use "auto" for automatic detection from code content or filename.'
+        ),
+    )
     filename: Optional[str] = Field(
-        None, description="Original filename (optional, used in reports)"
+        None, description="Original filename (optional, used in reports and auto-detection)"
     )
 
 
