@@ -1,0 +1,492 @@
+"""
+CoDude — Review Pipeline (Day 09 — Unified Bug Detection Pipeline)
+
+Fan-out, fan-in architecture that unifies all bug detection sources
+(AST + regex + LLM) into a single pipeline with:
+
+    1. Deduplication  — removes duplicate findings across sources
+    2. Priority sort  — critical > high > medium > low, then by line
+    3. Scoring        — computed overall_score with security 1.5× weight
+
+Pipeline order:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ 1. Language Detection  (sync, <1ms)                            │
+    │ 2. AST Analysis        (sync, Python only, <10ms)              │
+    │ 3. Regex Matching      (sync, JS/Java, <10ms)                  │
+    │ 4. LLM Calls           (async, all languages, ~1.5s parallel)  │
+    │    ├─ Bug Detection                                            │
+    │    ├─ Security Review                                          │
+    │    └─ Complexity Analysis                                      │
+    │ 5. Merge + Deduplicate + Sort + Score                          │
+    └─────────────────────────────────────────────────────────────────┘
+
+The asyncio.gather() call runs all three LLM chains concurrently,
+reducing total latency from ~(t₁+t₂+t₃) to ~max(t₁,t₂,t₃).
+At typical GPT-4o-mini speeds (~1.5s/call), this yields a 3× speedup.
+
+Usage:
+    pipeline = ReviewPipeline()
+    response = await pipeline.run(request)
+"""
+
+import asyncio
+import logging
+import time
+from difflib import SequenceMatcher
+
+from app.models.review import (
+    BugFinding,
+    CodeReviewRequest,
+    CodeReviewResponse,
+    ComplexityResult,
+    SecurityFinding,
+)
+from app.services.cache_service import CacheService
+from app.services.llm_service import LLMService
+from app.services.prompts.bug_detection import BUG_DETECTION_PROMPT
+from app.services.prompts.complexity_analysis import COMPLEXITY_ANALYSIS_PROMPT
+from app.services.prompts.security_review import SECURITY_REVIEW_PROMPT
+from app.services.prompts.structured_output import (
+    BugDetectionSchema,
+    ComplexityAnalysisSchema,
+    SecurityReviewSchema,
+)
+from app.services.static_analysis import (
+    ASTAnalyzer,
+    ComplexityChecker,
+    LanguageDetector,
+    PatternMatcher,
+    StyleChecker,
+)
+
+logger = logging.getLogger(__name__)
+
+# ── Severity ordering (lower index = higher priority) ────────────────────────
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+# ── Score penalty weights per severity ───────────────────────────────────────
+_BUG_PENALTIES = {"critical": 25, "high": 15, "medium": 7, "low": 2}
+
+# Security findings count 1.5× their bug-equivalent penalty
+_SECURITY_MULTIPLIER = 1.5
+
+# Message similarity threshold for deduplication (80%)
+_SIMILARITY_THRESHOLD = 0.80
+
+
+class ReviewPipeline:
+    """
+    Unified bug detection pipeline that merges static analysis and LLM
+    findings into a single, deduplicated, priority-sorted response.
+
+    Usage:
+        pipeline = ReviewPipeline()
+        response = await pipeline.run(request)
+    """
+
+    def __init__(self) -> None:
+        """Initialise all analyzers, LLM chains, cache, and language detector."""
+        self._llm_service = LLMService()
+        self._cache = CacheService()
+        self._language_detector = LanguageDetector()
+
+        # ── Static Analyzers ─────────────────────────────────────────────
+        self._ast_analyzer = ASTAnalyzer()
+        self._complexity_checker = ComplexityChecker()
+        self._style_checker = StyleChecker()
+        self._pattern_matcher = PatternMatcher()
+
+        # ── LCEL Chains (lazy — nothing runs until .ainvoke()) ───────────
+        self._bug_chain = (
+            BUG_DETECTION_PROMPT
+            | self._llm_service.with_structured_output(BugDetectionSchema)
+        )
+        self._security_chain = (
+            SECURITY_REVIEW_PROMPT
+            | self._llm_service.with_structured_output(SecurityReviewSchema)
+        )
+        self._complexity_chain = (
+            COMPLEXITY_ANALYSIS_PROMPT
+            | self._llm_service.with_structured_output(ComplexityAnalysisSchema)
+        )
+
+    async def run(self, request: CodeReviewRequest) -> CodeReviewResponse:
+        """
+        Execute the full review pipeline.
+
+        Steps:
+            1. Auto-detect language (if "auto")
+            2. Check cache
+            3. Run static analysis (sync)
+            4. Run LLM chains in parallel (async)
+            5. Merge, deduplicate, sort, score
+            6. Cache result
+            7. Return response with processing_time_ms
+
+        Args:
+            request: The client's code review request.
+
+        Returns:
+            A fully populated CodeReviewResponse.
+        """
+        t_start = time.perf_counter()
+
+        # ── Step 1: Language Detection ───────────────────────────────────
+        if request.language.lower() == "auto":
+            detected = self._language_detector.detect(
+                code=request.code, filename=request.filename
+            )
+            logger.info(
+                "Pipeline: auto-detected language → %s (filename=%s)",
+                detected,
+                request.filename,
+            )
+            request = request.model_copy(update={"language": detected})
+
+        # ── Step 2: Cache Check ──────────────────────────────────────────
+        cache_key = CacheService.make_key(request.code, request.language)
+        cached_data = await self._cache.get(cache_key)
+        if cached_data is not None:
+            logger.info("Pipeline: cache HIT — returning cached review")
+            elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+            cached_data["processing_time_ms"] = elapsed_ms
+            return CodeReviewResponse(**cached_data)
+
+        logger.info(
+            "Pipeline: cache MISS — running full pipeline — lang=%s, len=%d",
+            request.language,
+            len(request.code),
+        )
+
+        # ── Step 3: Static Analysis (sync, <10ms) ───────────────────────
+        static_bugs = self._run_static_analysis(request.code, request.language)
+        if static_bugs:
+            logger.info(
+                "Pipeline: static analysis found %d issue(s)", len(static_bugs)
+            )
+
+        # ── Step 4: LLM Analysis (async, parallel) ──────────────────────
+        chain_input = {"language": request.language, "code": request.code}
+
+        bug_result, security_result, complexity_result = await asyncio.gather(
+            self._bug_chain.ainvoke(chain_input),
+            self._security_chain.ainvoke(chain_input),
+            self._complexity_chain.ainvoke(chain_input),
+        )
+
+        logger.info(
+            "Pipeline: LLM complete — bugs=%d, security=%d",
+            len(bug_result.bugs),
+            len(security_result.security),
+        )
+
+        # ── Step 5: Merge + Deduplicate + Sort + Score ───────────────────
+        # Convert LLM bug schemas → API BugFinding models (source="llm")
+        llm_bugs = [
+            BugFinding(
+                line=b.line,
+                severity=b.severity,
+                message=b.message,
+                suggestion=b.suggestion,
+                source="llm",
+            )
+            for b in bug_result.bugs
+        ]
+
+        all_bugs = (static_bugs or []) + llm_bugs
+        all_bugs = self._deduplicate_findings(all_bugs)
+        all_bugs = self._sort_findings(all_bugs)
+
+        # Convert LLM security schemas → API SecurityFinding models
+        security = [
+            SecurityFinding(
+                line=s.line,
+                severity=s.severity,
+                message=s.message,
+                suggestion=s.suggestion,
+                owasp_category=s.owasp_category,
+            )
+            for s in security_result.security
+        ]
+
+        complexity = ComplexityResult(
+            time_complexity=complexity_result.time_complexity,
+            space_complexity=complexity_result.space_complexity,
+            explanation=complexity_result.explanation,
+            brute_force_alternative=complexity_result.suggestion,
+        )
+
+        # Compute score and summary
+        score = self._compute_score(all_bugs, security, complexity)
+        summary = self._synthesise_summary(all_bugs, security, complexity)
+
+        # ── Step 6: Build response with timing ──────────────────────────
+        elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+
+        response = CodeReviewResponse(
+            bugs=all_bugs,
+            security=security,
+            complexity=complexity,
+            summary=summary,
+            overall_score=score,
+            processing_time_ms=elapsed_ms,
+        )
+
+        # ── Step 7: Cache ────────────────────────────────────────────────
+        await self._cache.set(cache_key, response.model_dump(), ttl=3600)
+        logger.info(
+            "Pipeline: complete — score=%d, bugs=%d, security=%d, time=%dms",
+            score,
+            len(all_bugs),
+            len(security),
+            elapsed_ms,
+        )
+
+        return response
+
+    # ── Static Analysis ──────────────────────────────────────────────────────
+
+    def _run_static_analysis(self, code: str, language: str) -> list[BugFinding]:
+        """
+        Run static analyzers appropriate for the given language.
+
+        - Python: AST-based analyzers (ASTAnalyzer, ComplexityChecker, StyleChecker)
+        - JavaScript / Java: Regex-based PatternMatcher
+        - Other languages: empty list (LLM-only analysis)
+
+        Args:
+            code: The source code to analyze.
+            language: Programming language of the code.
+
+        Returns:
+            List of BugFinding objects with source="static".
+        """
+        lang = language.lower()
+        findings: list[BugFinding] = []
+
+        if lang == "python":
+            for analyzer_finding in (
+                self._ast_analyzer.analyze(code)
+                + self._complexity_checker.analyze(code)
+                + self._style_checker.analyze(code)
+            ):
+                findings.append(
+                    BugFinding(
+                        line=analyzer_finding.line,
+                        severity=analyzer_finding.severity,
+                        message=analyzer_finding.message,
+                        suggestion=analyzer_finding.suggestion,
+                        source="static",
+                    )
+                )
+        else:
+            for pf in self._pattern_matcher.match(code, lang):
+                findings.append(
+                    BugFinding(
+                        line=pf.line,
+                        severity=pf.severity,
+                        message=pf.message,
+                        suggestion=pf.suggestion,
+                        source="static",
+                    )
+                )
+
+        return findings
+
+    # ── Deduplication ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _deduplicate_findings(findings: list[BugFinding]) -> list[BugFinding]:
+        """
+        Remove duplicate findings across static and LLM sources.
+
+        Deduplication strategy:
+            Two findings are considered duplicates if:
+                1. They share the same line_number (or both are None), AND
+                2. Their messages have >80% similarity (SequenceMatcher ratio)
+
+            When a duplicate pair is found, we keep the static analyzer's
+            finding (it has a precise line number from AST/regex) and discard
+            the LLM duplicate.
+
+        Why keep static over LLM?
+            Static analyzers provide exact line numbers and deterministic
+            results. LLM findings may hallucinate line numbers or give
+            slightly different descriptions on each run.
+
+        Args:
+            findings: Combined list of static + LLM findings.
+
+        Returns:
+            Deduplicated list of BugFinding objects.
+        """
+        if not findings:
+            return findings
+
+        # Process findings: static first so they "win" during dedup
+        static = [f for f in findings if f.source == "static"]
+        llm = [f for f in findings if f.source == "llm"]
+
+        # Start with all static findings (always kept)
+        kept: list[BugFinding] = list(static)
+
+        for llm_finding in llm:
+            is_duplicate = False
+            for static_finding in static:
+                # Check same line (None matches None)
+                if llm_finding.line == static_finding.line:
+                    # Check message similarity
+                    similarity = SequenceMatcher(
+                        None,
+                        llm_finding.message.lower(),
+                        static_finding.message.lower(),
+                    ).ratio()
+                    if similarity > _SIMILARITY_THRESHOLD:
+                        is_duplicate = True
+                        logger.debug(
+                            "Pipeline: dedup — discarding LLM finding "
+                            "(line=%s, sim=%.0f%%): %s",
+                            llm_finding.line,
+                            similarity * 100,
+                            llm_finding.message[:60],
+                        )
+                        break
+            if not is_duplicate:
+                kept.append(llm_finding)
+
+        removed = len(findings) - len(kept)
+        if removed:
+            logger.info(
+                "Pipeline: deduplicated %d finding(s) — %d → %d",
+                removed,
+                len(findings),
+                len(kept),
+            )
+
+        return kept
+
+    # ── Scoring ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_score(
+        bugs: list[BugFinding],
+        security: list[SecurityFinding],
+        complexity: ComplexityResult,
+    ) -> int:
+        """
+        Compute an overall quality score from 0–100.
+
+        Formula:
+            Start at 100.
+            Subtract per bug:
+                critical: -25
+                high:     -15
+                medium:   -7
+                low:      -2
+            Security findings count 1.5× their equivalent penalty.
+            Clamp result to [0, 100].
+
+        Args:
+            bugs:       List of bug findings.
+            security:   List of security findings.
+            complexity: Complexity result (unused in scoring, reserved for future).
+
+        Returns:
+            Integer score clamped to [0, 100].
+        """
+        score = 100.0
+
+        # Bug penalties
+        for bug in bugs:
+            penalty = _BUG_PENALTIES.get(bug.severity, 2)
+            score -= penalty
+
+        # Security penalties (1.5× multiplier)
+        for sec in security:
+            penalty = _BUG_PENALTIES.get(sec.severity, 2) * _SECURITY_MULTIPLIER
+            score -= penalty
+
+        return max(0, min(100, int(score)))
+
+    # ── Sorting ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _sort_findings(findings: list[BugFinding]) -> list[BugFinding]:
+        """
+        Sort findings by severity (critical > high > medium > low),
+        then by line number (ascending, None last).
+
+        Args:
+            findings: Unsorted list of BugFinding objects.
+
+        Returns:
+            Sorted list of BugFinding objects.
+        """
+        return sorted(
+            findings,
+            key=lambda f: (
+                _SEVERITY_ORDER.get(f.severity, 99),
+                f.line if f.line is not None else float("inf"),
+            ),
+        )
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _synthesise_summary(
+        bugs: list[BugFinding],
+        security: list[SecurityFinding],
+        complexity: ComplexityResult,
+    ) -> str:
+        """
+        Generate a human-readable summary from the pipeline results.
+        """
+        parts = []
+
+        # Bug summary
+        if bugs:
+            static_count = sum(1 for b in bugs if b.source == "static")
+            llm_count = sum(1 for b in bugs if b.source == "llm")
+            critical_bugs = sum(1 for b in bugs if b.severity == "critical")
+            high_bugs = sum(1 for b in bugs if b.severity == "high")
+
+            source_detail = []
+            if static_count:
+                source_detail.append(f"{static_count} static")
+            if llm_count:
+                source_detail.append(f"{llm_count} AI")
+
+            parts.append(
+                f"Found {len(bugs)} bug(s)"
+                + (f" ({', '.join(source_detail)})" if source_detail else "")
+                + (
+                    f" — {critical_bugs} critical, {high_bugs} high"
+                    if critical_bugs or high_bugs
+                    else ""
+                )
+                + "."
+            )
+        else:
+            parts.append("No bugs detected.")
+
+        # Security summary
+        if security:
+            critical_sec = sum(1 for s in security if s.severity == "critical")
+            categories = set(s.owasp_category for s in security)
+            parts.append(
+                f"Found {len(security)} security issue(s)"
+                + (f" ({critical_sec} critical)" if critical_sec else "")
+                + f" across {len(categories)} OWASP category(ies)."
+            )
+        else:
+            parts.append("No security vulnerabilities found.")
+
+        # Complexity summary
+        parts.append(
+            f"Complexity: {complexity.time_complexity} time, "
+            f"{complexity.space_complexity} space."
+        )
+        if complexity.brute_force_alternative:
+            parts.append("An optimised alternative was suggested.")
+
+        return " ".join(parts)

@@ -135,11 +135,12 @@ class CodeReviewResponse(BaseModel):
     Aggregated review response returned to the client.
 
     Attributes:
-        bugs:           List of bugs found.
-        security:       List of security vulnerabilities found.
-        complexity:     Complexity analysis result.
-        summary:        Human-readable summary of the review.
-        overall_score:  Quality score from 0 (terrible) to 100 (perfect).
+        bugs:               List of bugs found.
+        security:           List of security vulnerabilities found.
+        complexity:         Complexity analysis result.
+        summary:            Human-readable summary of the review.
+        overall_score:      Quality score from 0 (terrible) to 100 (perfect).
+        processing_time_ms: Total pipeline execution time in milliseconds.
     """
 
     model_config = ConfigDict(
@@ -156,6 +157,7 @@ class CodeReviewResponse(BaseModel):
                     },
                     "summary": "Clean code with no issues found.",
                     "overall_score": 95,
+                    "processing_time_ms": 1520,
                 }
             ]
         }
@@ -173,4 +175,7 @@ class CodeReviewResponse(BaseModel):
     summary: str = Field(..., description="Human-readable review summary")
     overall_score: int = Field(
         ..., ge=0, le=100, description="Code quality score (0–100)"
+    )
+    processing_time_ms: int = Field(
+        0, ge=0, description="Total pipeline execution time in milliseconds"
     )
