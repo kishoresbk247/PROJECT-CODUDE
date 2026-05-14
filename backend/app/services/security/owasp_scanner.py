@@ -1,16 +1,22 @@
 """
-CoDude — OWASP Top 10 Security Scanner (Day 10 — Part 1)
+CoDude — OWASP Top 10 Security Scanner (Day 10 + Day 11)
 
-Dedicated security scanner covering the first 3 OWASP Top 10 (2021) categories:
+Dedicated security scanner covering all 10 OWASP Top 10 (2021) categories
+with at least one detection pattern per category:
 
     A02:2021 — Cryptographic Failures (Sensitive Data Exposure)
     A03:2021 — Injection (SQL, Command, LDAP, Template)
+    A03:2021 — Cross-Site Scripting (XSS)
+    A05:2021 — Security Misconfiguration
     A07:2021 — Identification and Authentication Failures
+    A08:2021 — Software and Data Integrity Failures (Insecure Deserialization)
+    A10:2021 — Server-Side Request Forgery (SSRF)
 
 Architecture:
-    OWASPScanner aggregates all pattern modules and scans code line-by-line,
+    OWASPScanner aggregates all 8 pattern modules and scans code line-by-line,
     returning SecurityFinding objects with OWASP category, CWE ID, severity,
-    and a remediation link for every match.
+    and a remediation link for every match.  Results are sorted by severity
+    (critical → high → medium → low) using the severity_mapper module.
 
     This is a pure static-analysis scanner — no LLM calls, no network I/O,
     sub-millisecond per scan.  It complements the existing LLM-based security
@@ -28,7 +34,12 @@ import logging
 
 from app.services.security.patterns.auth import AUTH_PATTERNS
 from app.services.security.patterns.data_exposure import DATA_EXPOSURE_PATTERNS
+from app.services.security.patterns.deserialization import DESERIALIZATION_PATTERNS
 from app.services.security.patterns.injection import INJECTION_PATTERNS
+from app.services.security.patterns.misconfig import MISCONFIG_PATTERNS
+from app.services.security.patterns.ssrf import SSRF_PATTERNS
+from app.services.security.patterns.xss import XSS_PATTERNS
+from app.services.security.severity_mapper import sort_findings_by_severity
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +91,34 @@ class SecurityFinding:
             f"cwe='{self.cwe_id}', owasp='{self.owasp_category}')"
         )
 
+    def to_dict(self) -> dict:
+        """Convert finding to a dictionary for JSON serialization."""
+        return {
+            "line": self.line,
+            "severity": self.severity,
+            "message": self.message,
+            "suggestion": self.suggestion,
+            "owasp_category": self.owasp_category,
+            "cwe_id": self.cwe_id,
+            "remediation_link": self.remediation_link,
+        }
+
 
 class OWASPScanner:
     """
-    OWASP Top 10 Security Scanner — Part 1.
+    OWASP Top 10 Security Scanner — Complete (Day 10 + Day 11).
 
-    Scans source code against compiled regex patterns for the first 5
-    OWASP Top 10 categories (A02, A03, A07).  Returns a list of
-    SecurityFinding objects with full OWASP metadata.
+    Scans source code against compiled regex patterns for all OWASP Top 10
+    categories:
+        - A02: Cryptographic Failures (data_exposure.py)
+        - A03: Injection (injection.py) + XSS (xss.py)
+        - A05: Security Misconfiguration (misconfig.py)
+        - A07: Auth Failures (auth.py)
+        - A08: Insecure Deserialization (deserialization.py)
+        - A10: SSRF (ssrf.py)
+
+    Returns a list of SecurityFinding objects sorted by severity (critical first),
+    with OWASP metadata including category, CWE ID, and remediation links.
 
     Supported languages: python, javascript, java
     (Patterns are language-aware where applicable; most patterns target
@@ -98,15 +129,25 @@ class OWASPScanner:
         lines takes <1ms on modern hardware.
     """
 
+    # Number of distinct OWASP categories covered by pattern modules
+    CATEGORIES_COVERED = 8
+
     def __init__(self) -> None:
         """Initialize the scanner with all registered pattern modules."""
         # Aggregate all patterns from all OWASP categories
         self._patterns: list[dict] = (
-            INJECTION_PATTERNS + AUTH_PATTERNS + DATA_EXPOSURE_PATTERNS
+            INJECTION_PATTERNS
+            + AUTH_PATTERNS
+            + DATA_EXPOSURE_PATTERNS
+            + XSS_PATTERNS
+            + MISCONFIG_PATTERNS
+            + DESERIALIZATION_PATTERNS
+            + SSRF_PATTERNS
         )
         logger.info(
-            "OWASPScanner initialized with %d patterns across 3 OWASP categories",
+            "OWASPScanner initialized with %d patterns across %d OWASP categories",
             len(self._patterns),
+            self.CATEGORIES_COVERED,
         )
 
     def scan(self, code: str, language: str = "python") -> list[SecurityFinding]:
@@ -120,8 +161,9 @@ class OWASPScanner:
                       sinks are often language-specific in the patterns).
 
         Returns:
-            A list of SecurityFinding objects, one per match, each with
-            OWASP category, CWE ID, and remediation link populated.
+            A list of SecurityFinding objects sorted by severity (critical
+            first), one per match, each with OWASP category, CWE ID, and
+            remediation link populated.
             Returns an empty list if no vulnerabilities are found.
         """
         findings: list[SecurityFinding] = []
@@ -150,6 +192,9 @@ class OWASPScanner:
                             remediation_link=pattern_entry["remediation_link"],
                         )
                     )
+
+        # Sort findings by severity (critical → high → medium → low)
+        findings = sort_findings_by_severity(findings)
 
         logger.info(
             "OWASPScanner found %d issue(s) in %s code (%d lines)",

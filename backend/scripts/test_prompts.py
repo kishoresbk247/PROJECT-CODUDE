@@ -1,5 +1,5 @@
 """
-CoDude — Prompt Engineering Test Script (Day 05)
+CoDude — Prompt Engineering Test Script (Day 05 + Day 11)
 
 Sends three different code snippets through the ReviewService to demonstrate
 the quality of the specialized prompt engineering:
@@ -10,11 +10,17 @@ the quality of the specialized prompt engineering:
 
 Run from the backend directory:
     python -m scripts.test_prompts
+    python -m scripts.test_prompts --output json
+
+Flags:
+    --output json    Print only formatted JSON to stdout (useful for debugging
+                     and piping to jq or other tools)
 
 This script uses the real ReviewService with live LLM calls (requires
 OPENAI_API_KEY in .env). Temperature=0 ensures deterministic output.
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -31,6 +37,23 @@ sys.path.insert(0, ".")
 
 from app.models.review import CodeReviewRequest
 from app.services.review_service import ReviewService
+
+
+# ── CLI Argument Parsing ─────────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="CoDude — Prompt Engineering Test Suite",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["pretty", "json"],
+        default="pretty",
+        help="Output format: 'pretty' (default) for colored terminal output, "
+             "'json' for formatted JSON to stdout.",
+    )
+    return parser.parse_args()
 
 
 # ── Test Snippets ────────────────────────────────────────────────────────────
@@ -225,13 +248,19 @@ async def run_test(
     name: str,
     code: str,
     language: str = "python",
-) -> None:
-    """Run a single test case and print results."""
-    print_header(f"TEST: {name}")
-    print(f"\n📄 {color('Input Code:', 'yellow')}")
-    print(SUB_DIVIDER)
-    for i, line in enumerate(code.strip().split("\n"), 1):
-        print(f"  {i:3d} | {line}")
+    output_format: str = "pretty",
+) -> dict | None:
+    """Run a single test case and print results.
+
+    Returns:
+        The raw response dict when output_format is 'json', else None.
+    """
+    if output_format == "pretty":
+        print_header(f"TEST: {name}")
+        print(f"\n📄 {color('Input Code:', 'yellow')}")
+        print(SUB_DIVIDER)
+        for i, line in enumerate(code.strip().split("\n"), 1):
+            print(f"  {i:3d} | {line}")
 
     request = CodeReviewRequest(code=code, language=language)
 
@@ -240,53 +269,86 @@ async def run_test(
         response = await service.review(request)
         elapsed = time.perf_counter() - start
 
-        print(f"\n⏱️  Completed in {color(f'{elapsed:.2f}s', 'green')}")
-        print_result(response)
+        if output_format == "pretty":
+            print(f"\n⏱️  Completed in {color(f'{elapsed:.2f}s', 'green')}")
+            print_result(response)
 
-        # Also print raw JSON for inspection
-        print(f"\n📋 {color('Raw JSON Output:', 'yellow')}")
-        print(SUB_DIVIDER)
-        raw = response.model_dump()
-        print(json.dumps(raw, indent=2, default=str))
+            # Also print raw JSON for inspection
+            print(f"\n📋 {color('Raw JSON Output:', 'yellow')}")
+            print(SUB_DIVIDER)
+            raw = response.model_dump()
+            print(json.dumps(raw, indent=2, default=str))
+
+        return {
+            "test_name": name,
+            "language": language,
+            "elapsed_seconds": round(elapsed, 3),
+            "result": response.model_dump(),
+        }
 
     except Exception as exc:
         elapsed = time.perf_counter() - start
-        print(f"\n❌ {color(f'FAILED after {elapsed:.2f}s: {exc}', 'red')}")
-        import traceback
-        traceback.print_exc()
+        if output_format == "pretty":
+            print(f"\n❌ {color(f'FAILED after {elapsed:.2f}s: {exc}', 'red')}")
+            import traceback
+            traceback.print_exc()
+        return {
+            "test_name": name,
+            "language": language,
+            "elapsed_seconds": round(elapsed, 3),
+            "error": str(exc),
+        }
 
 
 async def main() -> None:
     """Run all three test cases."""
-    print(color("\n🚀 CoDude — Day 05 Prompt Engineering Test Suite", "bold"))
-    print(color("   Running 3 test snippets through parallel specialized chains\n", "cyan"))
+    args = parse_args()
+    output_format = args.output
+
+    if output_format == "pretty":
+        print(color("\n🚀 CoDude — Prompt Engineering Test Suite", "bold"))
+        print(color("   Running 3 test snippets through parallel specialized chains\n", "cyan"))
 
     service = ReviewService()
+    results = []
 
     # Test 1: SQL injection code
-    await run_test(
+    result = await run_test(
         service,
         "SQL Injection Vulnerability",
         SQL_INJECTION_CODE,
+        output_format=output_format,
     )
+    if result:
+        results.append(result)
 
     # Test 2: O(n²) complexity code
-    await run_test(
+    result = await run_test(
         service,
         "O(n²) Quadratic Complexity",
         QUADRATIC_CODE,
+        output_format=output_format,
     )
+    if result:
+        results.append(result)
 
     # Test 3: Clean code
-    await run_test(
+    result = await run_test(
         service,
         "Clean Well-Written Code",
         CLEAN_CODE,
+        output_format=output_format,
     )
+    if result:
+        results.append(result)
 
-    print(f"\n{DIVIDER}")
-    print(color("  ✅ All tests complete!", "green"))
-    print(DIVIDER)
+    if output_format == "json":
+        # Print only formatted JSON to stdout
+        print(json.dumps(results, indent=2, default=str))
+    else:
+        print(f"\n{DIVIDER}")
+        print(color("  ✅ All tests complete!", "green"))
+        print(DIVIDER)
 
 
 if __name__ == "__main__":
