@@ -1,5 +1,5 @@
 """
-CoDude — OWASP Security Scanner Package (Day 10 + Day 11)
+CoDude — OWASP Security Scanner Package (Day 10 + Day 11 + Day 12)
 
 Complete security scanner covering all OWASP Top 10 (2021) categories:
 
@@ -10,6 +10,10 @@ Complete security scanner covering all OWASP Top 10 (2021) categories:
     A07:2021 — Identification and Authentication Failures
     A08:2021 — Software and Data Integrity Failures (Insecure Deserialization)
     A10:2021 — Server-Side Request Forgery (SSRF)
+
+Day 12 additions:
+    - ExploitExplainer:         LLM-enhanced exploit scenario generation
+    - SecurityReportGenerator:  Markdown report generation
 
 Pattern modules:
     - injection.py:       SQL, command, LDAP, and template injection patterns
@@ -24,7 +28,9 @@ All patterns return list[SecurityFinding] with OWASP category, CWE ID, and
 remediation links for professional-grade reporting.
 """
 
+from app.services.security.exploit_explainer import ExploitExplainer
 from app.services.security.owasp_scanner import OWASPScanner
+from app.services.security.report_generator import SecurityReportGenerator
 from app.services.security.severity_mapper import (
     get_default_severity,
     sort_findings_by_severity,
@@ -32,8 +38,11 @@ from app.services.security.severity_mapper import (
 )
 
 __all__ = [
+    "ExploitExplainer",
     "OWASPScanner",
+    "SecurityReportGenerator",
     "get_default_severity",
     "sort_findings_by_severity",
     "SEVERITY_ORDER",
 ]
+

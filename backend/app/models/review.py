@@ -88,12 +88,22 @@ class SecurityFinding(BaseModel):
     Represents a security vulnerability found during review.
     Same shape as BugFinding with an additional OWASP category.
 
+    Day 12 additions:
+        - exploit_scenario:  LLM-generated plain-English exploit explanation
+        - remediation_code:  LLM-generated corrected code snippet
+        - references:        CWE / OWASP reference links
+        - cwe_id:            Common Weakness Enumeration identifier
+
     Attributes:
-        line:            Line number where the vulnerability occurs.
-        severity:        How critical the vulnerability is.
-        message:         Human-readable description.
-        suggestion:      Recommended remediation.
-        owasp_category:  OWASP Top 10 category (e.g. "A01:2021 – Broken Access Control").
+        line:               Line number where the vulnerability occurs.
+        severity:           How critical the vulnerability is.
+        message:            Human-readable description.
+        suggestion:         Recommended remediation.
+        owasp_category:     OWASP Top 10 category (e.g. "A01:2021 – Broken Access Control").
+        exploit_scenario:   2-sentence exploit scenario (LLM-generated, critical/high only).
+        remediation_code:   Corrected code snippet (LLM-generated, critical/high only).
+        references:         Reference URLs (CWE, OWASP, remediation links).
+        cwe_id:             CWE identifier (e.g. "CWE-89").
     """
 
     model_config = ConfigDict(use_enum_values=True)
@@ -106,6 +116,27 @@ class SecurityFinding(BaseModel):
     suggestion: str = Field(..., description="Suggested remediation")
     owasp_category: str = Field(
         ..., description="OWASP Top 10 category (e.g. A03:2021 – Injection)"
+    )
+    exploit_scenario: Optional[str] = Field(
+        None,
+        description=(
+            "LLM-generated 2-sentence plain-English exploit scenario. "
+            "Only populated for critical/high severity findings to control costs."
+        ),
+    )
+    remediation_code: Optional[str] = Field(
+        None,
+        description=(
+            "LLM-generated corrected code snippet that fixes the vulnerability. "
+            "Only populated for critical/high severity findings."
+        ),
+    )
+    references: list[str] = Field(
+        default_factory=list,
+        description="Reference URLs (CWE pages, OWASP guides, remediation docs)",
+    )
+    cwe_id: Optional[str] = Field(
+        None, description="Common Weakness Enumeration ID (e.g. CWE-89)"
     )
 
 

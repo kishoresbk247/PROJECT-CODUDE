@@ -1,5 +1,5 @@
 """
-CoDude — Review Pipeline (Day 09 — Unified Bug Detection Pipeline)
+CoDude — Review Pipeline (Day 12 — LLM-Enhanced Security Analysis)
 
 Fan-out, fan-in architecture that unifies all bug detection sources
 (AST + regex + LLM) into a single pipeline with:
@@ -8,16 +8,28 @@ Fan-out, fan-in architecture that unifies all bug detection sources
     2. Priority sort  — critical > high > medium > low, then by line
     3. Scoring        — computed overall_score with security 1.5× weight
 
+Day 12 additions:
+    - OWASP static scanner integrated (runs alongside LLM security chain)
+    - ExploitExplainer enriches critical/high findings with:
+      • 2-sentence plain-English exploit scenarios
+      • Corrected code snippets
+      • CWE/OWASP reference links
+    - asyncio.gather() runs all exploit explanations in parallel
+    - In-memory review store for security-report endpoint
+
 Pipeline order:
     ┌─────────────────────────────────────────────────────────────────┐
     │ 1. Language Detection  (sync, <1ms)                            │
     │ 2. AST Analysis        (sync, Python only, <10ms)              │
     │ 3. Regex Matching      (sync, JS/Java, <10ms)                  │
-    │ 4. LLM Calls           (async, all languages, ~1.5s parallel)  │
+    │ 4. OWASP Static Scan   (sync, all languages, <1ms)             │
+    │ 5. LLM Calls           (async, all languages, ~1.5s parallel)  │
     │    ├─ Bug Detection                                            │
     │    ├─ Security Review                                          │
     │    └─ Complexity Analysis                                      │
-    │ 5. Merge + Deduplicate + Sort + Score                          │
+    │ 6. Merge Security (LLM + OWASP static)                        │
+    │ 7. Exploit Enrichment  (async, critical/high only, parallel)   │
+    │ 8. Merge + Deduplicate + Sort + Score                          │
     └─────────────────────────────────────────────────────────────────┘
 
 The asyncio.gather() call runs all three LLM chains concurrently,
@@ -51,6 +63,8 @@ from app.services.prompts.structured_output import (
     ComplexityAnalysisSchema,
     SecurityReviewSchema,
 )
+from app.services.security.exploit_explainer import ExploitExplainer
+from app.services.security.owasp_scanner import OWASPScanner
 from app.services.static_analysis import (
     ASTAnalyzer,
     ComplexityChecker,
@@ -72,6 +86,11 @@ _SECURITY_MULTIPLIER = 1.5
 
 # Message similarity threshold for deduplication (80%)
 _SIMILARITY_THRESHOLD = 0.80
+
+# ── In-memory review store (Day 12) ──────────────────────────────────────────
+# Maps review_id → CodeReviewResponse for the security-report endpoint.
+# Will be replaced by persistent storage in Day 19.
+_review_store: dict[str, "CodeReviewResponse"] = {}
 
 
 class ReviewPipeline:
@@ -96,6 +115,10 @@ class ReviewPipeline:
         self._style_checker = StyleChecker()
         self._pattern_matcher = PatternMatcher()
 
+        # ── OWASP Scanner + Exploit Explainer (Day 12) ───────────────────
+        self._owasp_scanner = OWASPScanner()
+        self._exploit_explainer = ExploitExplainer()
+
         # ── LCEL Chains (lazy — nothing runs until .ainvoke()) ───────────
         self._bug_chain = (
             BUG_DETECTION_PROMPT
@@ -109,6 +132,9 @@ class ReviewPipeline:
             COMPLEXITY_ANALYSIS_PROMPT
             | self._llm_service.with_structured_output(ComplexityAnalysisSchema)
         )
+
+        # ── Review counter for generating IDs ────────────────────────────
+        self._review_counter = 0
 
     async def run(self, request: CodeReviewRequest) -> CodeReviewResponse:
         """
@@ -165,7 +191,16 @@ class ReviewPipeline:
                 "Pipeline: static analysis found %d issue(s)", len(static_bugs)
             )
 
-        # ── Step 4: LLM Analysis (async, parallel) ──────────────────────
+        # ── Step 4: OWASP Static Security Scan (sync, <1ms) ─────────────
+        owasp_findings = self._owasp_scanner.scan(
+            request.code, language=request.language
+        )
+        if owasp_findings:
+            logger.info(
+                "Pipeline: OWASP scanner found %d issue(s)", len(owasp_findings)
+            )
+
+        # ── Step 5: LLM Analysis (async, parallel) ──────────────────────
         chain_input = {"language": request.language, "code": request.code}
 
         bug_result, security_result, complexity_result = await asyncio.gather(
@@ -180,7 +215,7 @@ class ReviewPipeline:
             len(security_result.security),
         )
 
-        # ── Step 5: Merge + Deduplicate + Sort + Score ───────────────────
+        # ── Step 6: Merge + Deduplicate + Sort + Score ───────────────────
         # Convert LLM bug schemas → API BugFinding models (source="llm")
         llm_bugs = [
             BugFinding(
@@ -198,7 +233,7 @@ class ReviewPipeline:
         all_bugs = self._sort_findings(all_bugs)
 
         # Convert LLM security schemas → API SecurityFinding models
-        security = [
+        llm_security = [
             SecurityFinding(
                 line=s.line,
                 severity=s.severity,
@@ -208,6 +243,28 @@ class ReviewPipeline:
             )
             for s in security_result.security
         ]
+
+        # Convert OWASP static findings → API SecurityFinding models
+        owasp_security = [
+            SecurityFinding(
+                line=f.line,
+                severity=f.severity,
+                message=f.message,
+                suggestion=f.suggestion,
+                owasp_category=f.owasp_category,
+                cwe_id=f.cwe_id,
+                references=[f.remediation_link] if f.remediation_link else [],
+            )
+            for f in owasp_findings
+        ]
+
+        # Merge LLM + OWASP security findings
+        security = llm_security + owasp_security
+
+        # ── Step 7: Exploit Enrichment (async, critical/high only) ───────
+        security = await self._enrich_security_findings(
+            security, request.code, request.language
+        )
 
         complexity = ComplexityResult(
             time_complexity=complexity_result.time_complexity,
@@ -220,7 +277,7 @@ class ReviewPipeline:
         score = self._compute_score(all_bugs, security, complexity)
         summary = self._synthesise_summary(all_bugs, security, complexity)
 
-        # ── Step 6: Build response with timing ──────────────────────────
+        # ── Step 8: Build response with timing ──────────────────────────
         elapsed_ms = int((time.perf_counter() - t_start) * 1000)
 
         response = CodeReviewResponse(
@@ -232,14 +289,23 @@ class ReviewPipeline:
             processing_time_ms=elapsed_ms,
         )
 
-        # ── Step 7: Cache ────────────────────────────────────────────────
+        # ── Step 9: Cache + Store ────────────────────────────────────────
         await self._cache.set(cache_key, response.model_dump(), ttl=3600)
+
+        # Store in memory for security-report endpoint (Day 12)
+        self._review_counter += 1
+        review_id = str(self._review_counter)
+        _review_store[review_id] = response
+        # Also store as "latest" for convenience
+        _review_store["latest"] = response
+
         logger.info(
-            "Pipeline: complete — score=%d, bugs=%d, security=%d, time=%dms",
+            "Pipeline: complete — score=%d, bugs=%d, security=%d, time=%dms, review_id=%s",
             score,
             len(all_bugs),
             len(security),
             elapsed_ms,
+            review_id,
         )
 
         return response
@@ -292,6 +358,55 @@ class ReviewPipeline:
                 )
 
         return findings
+
+    # ── Exploit Enrichment (Day 12) ───────────────────────────────────────────
+
+    async def _enrich_security_findings(
+        self,
+        findings: list[SecurityFinding],
+        code: str,
+        language: str,
+    ) -> list[SecurityFinding]:
+        """
+        Enrich critical/high security findings with LLM-generated exploit
+        explanations and remediation code snippets.
+
+        Uses asyncio.gather() to process all eligible findings in parallel,
+        reducing latency from O(n) to O(1) LLM calls.
+
+        Medium/low findings are passed through unchanged (with only reference
+        links added — no LLM cost).
+
+        Args:
+            findings: List of SecurityFinding objects.
+            code:     Full source code for context extraction.
+            language: Programming language of the code.
+
+        Returns:
+            List of SecurityFinding objects with enrichment fields populated.
+        """
+        if not findings:
+            return findings
+
+        # Run all exploit explanations in parallel via asyncio.gather()
+        enriched = await asyncio.gather(
+            *[
+                self._exploit_explainer.explain(finding, code, language)
+                for finding in findings
+            ]
+        )
+
+        critical_high = sum(
+            1 for f in enriched
+            if f.severity in ("critical", "high") and f.exploit_scenario
+        )
+        logger.info(
+            "Pipeline: enriched %d/%d findings with exploit scenarios",
+            critical_high,
+            len(findings),
+        )
+
+        return list(enriched)
 
     # ── Deduplication ────────────────────────────────────────────────────────
 
