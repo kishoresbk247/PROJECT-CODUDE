@@ -10,6 +10,7 @@ Models:
     - CodeReviewRequest:   What the client sends (code + metadata)
     - BugFinding:          A single bug detected in the code
     - SecurityFinding:     A security vulnerability (extends BugFinding shape)
+    - FunctionComplexity:  Per-function Big-O annotation (Day 13)
     - ComplexityResult:    Big-O analysis of the submitted code
     - CodeReviewResponse:  Aggregated results returned to the client
 """
@@ -140,6 +141,38 @@ class SecurityFinding(BaseModel):
     )
 
 
+class FunctionComplexity(BaseModel):
+    """
+    Per-function Big-O complexity annotation (Day 13).
+
+    Each function in the submitted code gets its own complexity analysis
+    with time/space complexity, confidence level, and reasoning.
+
+    Attributes:
+        function_name:    Name of the analyzed function.
+        line_start:       First line of the function definition.
+        line_end:         Last line of the function body.
+        time_complexity:  Big-O time complexity (e.g. "O(n²)").
+        space_complexity: Big-O space complexity (e.g. "O(1)").
+        confidence:       How confident the analyzer is in its assessment.
+        reasoning:        Step-by-step explanation of the complexity derivation.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    function_name: str = Field(..., description="Name of the analyzed function")
+    line_start: int = Field(..., description="First line of the function")
+    line_end: int = Field(..., description="Last line of the function")
+    time_complexity: str = Field(
+        ..., description="Big-O time complexity (e.g. 'O(n²)')")
+    space_complexity: str = Field(
+        ..., description="Big-O space complexity (e.g. 'O(1)')")
+    confidence: Literal["high", "medium", "low"] = Field(
+        ..., description="Confidence level of the analysis")
+    reasoning: str = Field(
+        ..., description="Step-by-step explanation of the complexity derivation")
+
+
 class ComplexityResult(BaseModel):
     """
     Big-O complexity analysis of the submitted code.
@@ -149,6 +182,7 @@ class ComplexityResult(BaseModel):
         space_complexity:         e.g. "O(n)"
         explanation:              Why the code has this complexity.
         brute_force_alternative:  Optional note on a naïve approach for comparison.
+        function_complexities:    Per-function annotations (Day 13).
     """
 
     time_complexity: str = Field(..., description="Time complexity (Big-O)")
@@ -156,6 +190,10 @@ class ComplexityResult(BaseModel):
     explanation: str = Field(..., description="Explanation of the analysis")
     brute_force_alternative: Optional[str] = Field(
         None, description="Brute-force alternative for comparison"
+    )
+    function_complexities: list[FunctionComplexity] = Field(
+        default_factory=list,
+        description="Per-function Big-O annotations (Day 13 complexity annotator)",
     )
 
 

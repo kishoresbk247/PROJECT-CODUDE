@@ -1,5 +1,5 @@
 """
-CoDude — Review Pipeline (Day 12 — LLM-Enhanced Security Analysis)
+CoDude — Review Pipeline (Day 13 — Per-Function Complexity Annotator)
 
 Fan-out, fan-in architecture that unifies all bug detection sources
 (AST + regex + LLM) into a single pipeline with:
@@ -10,12 +10,14 @@ Fan-out, fan-in architecture that unifies all bug detection sources
 
 Day 12 additions:
     - OWASP static scanner integrated (runs alongside LLM security chain)
-    - ExploitExplainer enriches critical/high findings with:
-      • 2-sentence plain-English exploit scenarios
-      • Corrected code snippets
-      • CWE/OWASP reference links
+    - ExploitExplainer enriches critical/high findings
     - asyncio.gather() runs all exploit explanations in parallel
     - In-memory review store for security-report endpoint
+
+Day 13 additions:
+    - Per-function complexity annotator (ASTComplexityAnalyzer + SpaceAnalyzer)
+    - ComplexityService runs AST first, LLM fallback for low-confidence
+    - FunctionComplexity objects attached to ComplexityResult
 
 Pipeline order:
     ┌─────────────────────────────────────────────────────────────────┐
@@ -23,13 +25,14 @@ Pipeline order:
     │ 2. AST Analysis        (sync, Python only, <10ms)              │
     │ 3. Regex Matching      (sync, JS/Java, <10ms)                  │
     │ 4. OWASP Static Scan   (sync, all languages, <1ms)             │
-    │ 5. LLM Calls           (async, all languages, ~1.5s parallel)  │
+    │ 5. Per-Function Complexity (sync AST + async LLM, <10ms+)      │
+    │ 6. LLM Calls           (async, all languages, ~1.5s parallel)  │
     │    ├─ Bug Detection                                            │
     │    ├─ Security Review                                          │
-    │    └─ Complexity Analysis                                      │
-    │ 6. Merge Security (LLM + OWASP static)                        │
-    │ 7. Exploit Enrichment  (async, critical/high only, parallel)   │
-    │ 8. Merge + Deduplicate + Sort + Score                          │
+    │    └─ Complexity Analysis (overall)                             │
+    │ 7. Merge Security (LLM + OWASP static)                        │
+    │ 8. Exploit Enrichment  (async, critical/high only, parallel)   │
+    │ 9. Merge + Deduplicate + Sort + Score                          │
     └─────────────────────────────────────────────────────────────────┘
 
 The asyncio.gather() call runs all three LLM chains concurrently,
@@ -51,6 +54,7 @@ from app.models.review import (
     CodeReviewRequest,
     CodeReviewResponse,
     ComplexityResult,
+    FunctionComplexity,
     SecurityFinding,
 )
 from app.services.cache_service import CacheService
@@ -63,6 +67,7 @@ from app.services.prompts.structured_output import (
     ComplexityAnalysisSchema,
     SecurityReviewSchema,
 )
+from app.services.complexity import ComplexityService
 from app.services.security.exploit_explainer import ExploitExplainer
 from app.services.security.owasp_scanner import OWASPScanner
 from app.services.static_analysis import (
@@ -118,6 +123,9 @@ class ReviewPipeline:
         # ── OWASP Scanner + Exploit Explainer (Day 12) ───────────────────
         self._owasp_scanner = OWASPScanner()
         self._exploit_explainer = ExploitExplainer()
+
+        # ── Per-Function Complexity Annotator (Day 13) ───────────────────
+        self._complexity_service = ComplexityService()
 
         # ── LCEL Chains (lazy — nothing runs until .ainvoke()) ───────────
         self._bug_chain = (
@@ -266,11 +274,22 @@ class ReviewPipeline:
             security, request.code, request.language
         )
 
+        # ── Step 7b: Per-Function Complexity (Day 13) ────────────────────
+        function_complexities = await self._complexity_service.analyze(
+            request.code, request.language
+        )
+        if function_complexities:
+            logger.info(
+                "Pipeline: per-function complexity — %d function(s) annotated",
+                len(function_complexities),
+            )
+
         complexity = ComplexityResult(
             time_complexity=complexity_result.time_complexity,
             space_complexity=complexity_result.space_complexity,
             explanation=complexity_result.explanation,
             brute_force_alternative=complexity_result.suggestion,
+            function_complexities=function_complexities,
         )
 
         # Compute score and summary

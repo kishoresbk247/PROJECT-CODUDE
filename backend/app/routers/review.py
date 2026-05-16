@@ -1,24 +1,26 @@
 """
-CoDude — Review Router (Day 12 — Security Report Endpoint)
+CoDude — Review Router (Day 13 — Per-Function Complexity Endpoint)
 
 Endpoints for the code review API. The main POST /api/v1/review endpoint
-is now wired to the unified ReviewPipeline (Day 12), which runs:
+is now wired to the unified ReviewPipeline, which runs:
     1. Language detection
     2. AST analysis (Python)
     3. Regex matching (JS/Java)
     4. OWASP static security scan
-    5. Async LLM calls (bugs + security + complexity)
-    6. Merge LLM + OWASP security findings
-    7. Exploit enrichment (critical/high only, parallel)
-    8. Deduplication, sorting, and scoring
+    5. Per-function complexity annotation (Day 13)
+    6. Async LLM calls (bugs + security + complexity)
+    7. Merge LLM + OWASP security findings
+    8. Exploit enrichment (critical/high only, parallel)
+    9. Deduplication, sorting, and scoring
 
-Day 12 additions:
-    - GET /api/v1/review/{review_id}/security-report endpoint
-      Returns a markdown-formatted security report for a completed review
+Day 13 additions:
+    - POST /api/v1/analyze/complexity endpoint
+      Returns per-function complexity annotations (faster, cheaper)
 
 Routes:
     POST /api/v1/review                              — Full pipeline-powered code review
     GET  /api/v1/review/{review_id}/security-report  — Security report (markdown)
+    POST /api/v1/analyze/complexity                   — Per-function complexity only
     POST /api/v1/review/bugs                         — Bug detection only (stub)
     POST /api/v1/review/security                     — Security analysis only (stub)
     POST /api/v1/review/complexity                   — Complexity analysis only (stub)
@@ -35,8 +37,10 @@ from app.models.review import (
     CodeReviewRequest,
     CodeReviewResponse,
     ComplexityResult,
+    FunctionComplexity,
     SecurityFinding,
 )
+from app.services.complexity import ComplexityService
 from app.services.pipeline import ReviewPipeline, _review_store
 from app.services.security.report_generator import SecurityReportGenerator
 
@@ -50,6 +54,7 @@ router = APIRouter(prefix="/api/v1", tags=["review"])
 
 _pipeline = ReviewPipeline()
 _report_generator = SecurityReportGenerator()
+_complexity_service = ComplexityService()
 
 
 # ── Mock Data Generators (for stub endpoints) ───────────────────────────────
@@ -246,4 +251,60 @@ async def review_complexity(request: CodeReviewRequest) -> ComplexityResult:
     This is currently a STUB — returns mock data.
     """
     return _mock_complexity()
+
+
+@router.post(
+    "/analyze/complexity",
+    response_model=list[FunctionComplexity],
+    summary="Per-function complexity analysis",
+    description=(
+        "Analyzes time and space complexity for each function in the submitted "
+        "code using AST pattern matching with LLM fallback for ambiguous cases. "
+        "Faster and cheaper than a full review when you only need complexity."
+    ),
+)
+@limiter.limit("20/minute")
+async def analyze_complexity(
+    request: Request, review_request: CodeReviewRequest
+) -> list[FunctionComplexity]:
+    """
+    Per-function complexity analysis endpoint (Day 13).
+
+    Uses a hybrid approach:
+        - AST pattern matching for 90% of cases (free, <10ms)
+        - LLM fallback for low-confidence functions (~$0.002/call)
+
+    Returns a FunctionComplexity for each function in the code with:
+        - function_name, line_start, line_end
+        - time_complexity (Big-O)
+        - space_complexity (Big-O)
+        - confidence level (high/medium/low)
+        - reasoning explanation
+
+    Args:
+        review_request: Code review request with code and language.
+
+    Returns:
+        List of FunctionComplexity objects, one per function found.
+    """
+    try:
+        logger.info(
+            "Complexity analysis request — language=%s, code_length=%d",
+            review_request.language,
+            len(review_request.code),
+        )
+        results = await _complexity_service.analyze(
+            review_request.code, review_request.language
+        )
+        logger.info(
+            "Complexity analysis complete — %d function(s) analyzed",
+            len(results),
+        )
+        return results
+    except Exception as exc:
+        logger.error("Complexity analysis failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Analysis error: {str(exc)}",
+        ) from exc
 
