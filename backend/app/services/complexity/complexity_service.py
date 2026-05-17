@@ -1,5 +1,5 @@
 """
-CoDude — Complexity Service (Day 13)
+CoDude — Complexity Service (Day 14)
 
 Orchestrator that combines AST-based pattern matching with selective LLM
 analysis for per-function Big-O complexity annotation.
@@ -11,6 +11,11 @@ Strategy (hybrid approach):
        prompt for JUST that function (async, ~1.5s, ~$0.002/call)
     4. Return FunctionComplexity objects with combined results
 
+Day 14 additions:
+    5. Run BruteForceDetector to identify optimisation opportunities
+    6. For detected patterns, run SolutionGenerator (targeted LLM prompts)
+    7. Return OptimizationOpportunity objects alongside complexity results
+
 This mirrors the hybrid AI/static analysis pattern from Day 12:
     - Static rules are the primary signal (fast, precise, free)
     - LLMs add contextual understanding for ambiguous cases
@@ -18,18 +23,21 @@ This mirrors the hybrid AI/static analysis pattern from Day 12:
 
 Usage:
     service = ComplexityService()
-    results = await service.analyze(code, language="python")
+    complexities, opportunities = await service.analyze(code, language="python")
 """
 
+import asyncio
 import ast
 import logging
 from typing import Optional
 
-from app.models.review import FunctionComplexity
+from app.models.review import FunctionComplexity, OptimizationOpportunity
 from app.services.complexity.ast_complexity import (
     ASTComplexityAnalyzer,
     FunctionComplexityResult,
 )
+from app.services.complexity.brute_force_detector import BruteForceDetector
+from app.services.complexity.solution_generator import SolutionGenerator
 from app.services.complexity.space_analyzer import SpaceAnalyzer
 from app.services.llm_service import LLMService
 from app.services.prompts.complexity_analysis import COMPLEXITY_ANALYSIS_PROMPT
@@ -43,15 +51,20 @@ class ComplexityService:
     Orchestrates per-function Big-O complexity analysis using a hybrid
     approach: AST pattern matching first, LLM fallback for low-confidence.
 
+    Day 14: Also detects brute-force patterns and generates optimised
+    solution suggestions using targeted LLM prompts.
+
     Usage:
         service = ComplexityService()
-        results = await service.analyze(code, language="python")
+        complexities, opportunities = await service.analyze(code, language="python")
     """
 
     def __init__(self) -> None:
-        """Initialise analyzers and LLM chain."""
+        """Initialise analyzers, detector, generator, and LLM chain."""
         self._ast_analyzer = ASTComplexityAnalyzer()
         self._space_analyzer = SpaceAnalyzer()
+        self._brute_force_detector = BruteForceDetector()
+        self._solution_generator = SolutionGenerator()
         self._llm_service = LLMService()
         self._llm_chain = (
             COMPLEXITY_ANALYSIS_PROMPT
@@ -60,22 +73,25 @@ class ComplexityService:
 
     async def analyze(
         self, code: str, language: str = "python"
-    ) -> list[FunctionComplexity]:
+    ) -> tuple[list[FunctionComplexity], list[OptimizationOpportunity]]:
         """
-        Analyze per-function complexity using AST + optional LLM fallback.
+        Analyze per-function complexity using AST + optional LLM fallback,
+        then detect brute-force patterns and generate optimisation suggestions.
 
         Steps:
             1. AST time complexity analysis for all functions
             2. AST space complexity analysis for all functions
             3. LLM enrichment for low-confidence functions only
             4. Merge into FunctionComplexity models
+            5. Brute-force pattern detection (Day 14)
+            6. Solution generation for detected patterns (Day 14)
 
         Args:
             code:     Source code to analyze.
             language: Programming language (AST only works for Python).
 
         Returns:
-            List of FunctionComplexity objects, one per function.
+            Tuple of (FunctionComplexity list, OptimizationOpportunity list).
         """
         # ── Step 1: AST time complexity ─────────────────────────────────
         if language.lower() != "python":
@@ -84,12 +100,13 @@ class ComplexityService:
                 "ComplexityService: non-Python language '%s' — using LLM-only",
                 language,
             )
-            return await self._llm_only_analysis(code, language)
+            results = await self._llm_only_analysis(code, language)
+            return results, []  # No brute-force detection for non-Python
 
         time_results = self._ast_analyzer.analyze(code)
         if not time_results:
             logger.info("ComplexityService: no functions found in code")
-            return []
+            return [], []
 
         logger.info(
             "ComplexityService: AST found %d function(s)", len(time_results)
@@ -144,7 +161,37 @@ class ComplexityService:
             sum(1 for r in enriched_results if r.confidence == "low"),
         )
 
-        return enriched_results
+        # ── Step 5: Brute-force detection (Day 14) ──────────────────────
+        detected_patterns = self._brute_force_detector.detect(
+            time_results, code
+        )
+
+        # ── Step 6: Solution generation (Day 14) ────────────────────────
+        opportunities: list[OptimizationOpportunity] = []
+        if detected_patterns:
+            # Run all solution generations in parallel
+            gen_results = await asyncio.gather(
+                *[
+                    self._solution_generator.generate(dp, language)
+                    for dp in detected_patterns
+                ],
+                return_exceptions=True,
+            )
+            for gen_result in gen_results:
+                if isinstance(gen_result, OptimizationOpportunity):
+                    opportunities.append(gen_result)
+                elif isinstance(gen_result, Exception):
+                    logger.warning(
+                        "ComplexityService: solution generation failed: %s",
+                        gen_result,
+                    )
+
+            logger.info(
+                "ComplexityService: generated %d optimisation suggestion(s)",
+                len(opportunities),
+            )
+
+        return enriched_results, opportunities
 
     async def _llm_analyze_function(
         self,

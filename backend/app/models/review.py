@@ -7,12 +7,13 @@ maximum performance — the Pydantic v2 core is compiled in Rust and
 is 5–50x faster than the v1 Python implementation.
 
 Models:
-    - CodeReviewRequest:   What the client sends (code + metadata)
-    - BugFinding:          A single bug detected in the code
-    - SecurityFinding:     A security vulnerability (extends BugFinding shape)
-    - FunctionComplexity:  Per-function Big-O annotation (Day 13)
-    - ComplexityResult:    Big-O analysis of the submitted code
-    - CodeReviewResponse:  Aggregated results returned to the client
+    - CodeReviewRequest:        What the client sends (code + metadata)
+    - BugFinding:               A single bug detected in the code
+    - SecurityFinding:          A security vulnerability (extends BugFinding shape)
+    - FunctionComplexity:       Per-function Big-O annotation (Day 13)
+    - OptimizationOpportunity:  Brute-force → optimal suggestion (Day 14)
+    - ComplexityResult:         Big-O analysis of the submitted code
+    - CodeReviewResponse:       Aggregated results returned to the client
 """
 
 from typing import Literal, Optional
@@ -173,16 +174,61 @@ class FunctionComplexity(BaseModel):
         ..., description="Step-by-step explanation of the complexity derivation")
 
 
+class OptimizationOpportunity(BaseModel):
+    """
+    A brute-force → optimal solution suggestion (Day 14).
+
+    Returned when the AST analyzer detects that a function uses a
+    brute-force approach and a faster algorithm exists.
+
+    Attributes:
+        pattern_name:        Key from ALGORITHM_PATTERNS (e.g. "nested_loop_two_sum").
+        current_complexity:  Big-O of the current brute-force approach.
+        optimal_complexity:  Big-O of the suggested optimal approach.
+        improvement_factor:  Human-readable improvement (e.g. "O(n²) → O(n)").
+        suggested_approach:  Name of the optimal algorithm / data structure.
+        explanation:         3-sentence explanation of why the current approach is suboptimal.
+        example_code:        LLM-generated optimised implementation (or None on failure).
+        function_name:       Name of the function this applies to.
+        line_start:          First line of the function.
+        line_end:            Last line of the function.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    pattern_name: str = Field(
+        ..., description="Pattern key from ALGORITHM_PATTERNS")
+    current_complexity: str = Field(
+        ..., description="Big-O of the current brute-force approach")
+    optimal_complexity: str = Field(
+        ..., description="Big-O of the optimal approach")
+    improvement_factor: str = Field(
+        ..., description="Human-readable improvement (e.g. 'O(n²) → O(n)')")
+    suggested_approach: str = Field(
+        ..., description="Name of the optimal algorithm / data structure")
+    explanation: str = Field(
+        ..., description="3-sentence explanation of why the current approach is suboptimal")
+    example_code: Optional[str] = Field(
+        None, description="LLM-generated optimised implementation")
+    function_name: str = Field(
+        ..., description="Name of the function this applies to")
+    line_start: int = Field(
+        ..., description="First line of the function")
+    line_end: int = Field(
+        ..., description="Last line of the function")
+
+
 class ComplexityResult(BaseModel):
     """
     Big-O complexity analysis of the submitted code.
 
     Attributes:
-        time_complexity:          e.g. "O(n log n)"
-        space_complexity:         e.g. "O(n)"
-        explanation:              Why the code has this complexity.
-        brute_force_alternative:  Optional note on a naïve approach for comparison.
-        function_complexities:    Per-function annotations (Day 13).
+        time_complexity:              e.g. "O(n log n)"
+        space_complexity:             e.g. "O(n)"
+        explanation:                  Why the code has this complexity.
+        brute_force_alternative:      Optional note on a naïve approach for comparison.
+        function_complexities:        Per-function annotations (Day 13).
+        optimization_opportunities:   Brute-force → optimal suggestions (Day 14).
     """
 
     time_complexity: str = Field(..., description="Time complexity (Big-O)")
@@ -194,6 +240,10 @@ class ComplexityResult(BaseModel):
     function_complexities: list[FunctionComplexity] = Field(
         default_factory=list,
         description="Per-function Big-O annotations (Day 13 complexity annotator)",
+    )
+    optimization_opportunities: list[OptimizationOpportunity] = Field(
+        default_factory=list,
+        description="Brute-force → optimal solution suggestions (Day 14)",
     )
 
 

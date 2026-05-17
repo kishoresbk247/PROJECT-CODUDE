@@ -1,5 +1,5 @@
 """
-CoDude — Review Pipeline (Day 13 — Per-Function Complexity Annotator)
+CoDude — Review Pipeline (Day 14 — Brute-Force Detection & Optimal Solutions)
 
 Fan-out, fan-in architecture that unifies all bug detection sources
 (AST + regex + LLM) into a single pipeline with:
@@ -18,6 +18,11 @@ Day 13 additions:
     - Per-function complexity annotator (ASTComplexityAnalyzer + SpaceAnalyzer)
     - ComplexityService runs AST first, LLM fallback for low-confidence
     - FunctionComplexity objects attached to ComplexityResult
+
+Day 14 additions:
+    - BruteForceDetector identifies suboptimal algorithm patterns
+    - SolutionGenerator produces targeted LLM-powered optimisations
+    - OptimizationOpportunity objects attached to ComplexityResult
 
 Pipeline order:
     ┌─────────────────────────────────────────────────────────────────┐
@@ -55,6 +60,7 @@ from app.models.review import (
     CodeReviewResponse,
     ComplexityResult,
     FunctionComplexity,
+    OptimizationOpportunity,
     SecurityFinding,
 )
 from app.services.cache_service import CacheService
@@ -274,14 +280,21 @@ class ReviewPipeline:
             security, request.code, request.language
         )
 
-        # ── Step 7b: Per-Function Complexity (Day 13) ────────────────────
-        function_complexities = await self._complexity_service.analyze(
-            request.code, request.language
+        # ── Step 7b: Per-Function Complexity + Brute-Force Detection (Day 14) ─
+        function_complexities, optimization_opportunities = (
+            await self._complexity_service.analyze(
+                request.code, request.language
+            )
         )
         if function_complexities:
             logger.info(
                 "Pipeline: per-function complexity — %d function(s) annotated",
                 len(function_complexities),
+            )
+        if optimization_opportunities:
+            logger.info(
+                "Pipeline: brute-force detection — %d optimisation(s) found",
+                len(optimization_opportunities),
             )
 
         complexity = ComplexityResult(
@@ -290,6 +303,7 @@ class ReviewPipeline:
             explanation=complexity_result.explanation,
             brute_force_alternative=complexity_result.suggestion,
             function_complexities=function_complexities,
+            optimization_opportunities=optimization_opportunities,
         )
 
         # Compute score and summary
