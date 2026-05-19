@@ -12,6 +12,7 @@ Models:
     - SecurityFinding:          A security vulnerability (extends BugFinding shape)
     - FunctionComplexity:       Per-function Big-O annotation (Day 13)
     - OptimizationOpportunity:  Brute-force → optimal suggestion (Day 14)
+    - ComplexityVisualization:  Frontend-ready chart data (Day 15)
     - ComplexityResult:         Big-O analysis of the submitted code
     - CodeReviewResponse:       Aggregated results returned to the client
 """
@@ -218,6 +219,43 @@ class OptimizationOpportunity(BaseModel):
         ..., description="Last line of the function")
 
 
+class ComplexityVisualization(BaseModel):
+    """
+    Frontend-ready visualization data for complexity charting (Day 15).
+
+    Converts per-function complexity strings into numeric scores for
+    easy sorting, comparison, and bar/radar chart rendering.
+
+    Numeric score mapping:
+        O(1)       → 1
+        O(log n)   → 2
+        O(n)       → 3
+        O(n log n) → 4
+        O(n²)      → 5
+        O(2ⁿ)      → 6
+
+    Attributes:
+        labels:              Function names (x-axis labels for charts).
+        time_complexities:   Big-O time complexity strings per function.
+        space_complexities:  Big-O space complexity strings per function.
+        complexity_scores:   Numeric scores for the time complexities.
+    """
+
+    labels: list[str] = Field(
+        ..., description="Function names (chart x-axis labels)")
+    time_complexities: list[str] = Field(
+        ..., description="Big-O time complexity per function")
+    space_complexities: list[str] = Field(
+        ..., description="Big-O space complexity per function")
+    complexity_scores: list[int] = Field(
+        ...,
+        description=(
+            "Numeric scores: O(1)=1, O(log n)=2, O(n)=3, "
+            "O(n log n)=4, O(n²)=5, O(2ⁿ)=6"
+        ),
+    )
+
+
 class ComplexityResult(BaseModel):
     """
     Big-O complexity analysis of the submitted code.
@@ -229,6 +267,8 @@ class ComplexityResult(BaseModel):
         brute_force_alternative:      Optional note on a naïve approach for comparison.
         function_complexities:        Per-function annotations (Day 13).
         optimization_opportunities:   Brute-force → optimal suggestions (Day 14).
+        visualization:                Frontend-ready chart data (Day 15).
+        summary:                      LLM-generated executive summary (Day 15).
     """
 
     time_complexity: str = Field(..., description="Time complexity (Big-O)")
@@ -244,6 +284,14 @@ class ComplexityResult(BaseModel):
     optimization_opportunities: list[OptimizationOpportunity] = Field(
         default_factory=list,
         description="Brute-force → optimal solution suggestions (Day 14)",
+    )
+    visualization: Optional[ComplexityVisualization] = Field(
+        None,
+        description="Frontend-ready visualization data for charting (Day 15)",
+    )
+    summary: Optional[str] = Field(
+        None,
+        description="LLM-generated plain-English executive summary (Day 15)",
     )
 
 

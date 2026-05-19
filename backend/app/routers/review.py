@@ -1,5 +1,5 @@
 """
-CoDude — Review Router (Day 13 — Per-Function Complexity Endpoint)
+CoDude — Review Router (Day 15 — Visualization Data & Complexity Summary)
 
 Endpoints for the code review API. The main POST /api/v1/review endpoint
 is now wired to the unified ReviewPipeline, which runs:
@@ -17,10 +17,15 @@ Day 13 additions:
     - POST /api/v1/analyze/complexity endpoint
       Returns per-function complexity annotations (faster, cheaper)
 
+Day 15 additions:
+    - /analyze/complexity now returns ComplexityResult with visualization + summary
+    - GET /api/v1/analyze/complexity/summary — Fetches just the complexity summary
+
 Routes:
     POST /api/v1/review                              — Full pipeline-powered code review
     GET  /api/v1/review/{review_id}/security-report  — Security report (markdown)
-    POST /api/v1/analyze/complexity                   — Per-function complexity only
+    POST /api/v1/analyze/complexity                   — Per-function complexity + viz + summary
+    GET  /api/v1/analyze/complexity/summary           — Complexity summary only
     POST /api/v1/review/bugs                         — Bug detection only (stub)
     POST /api/v1/review/security                     — Security analysis only (stub)
     POST /api/v1/review/complexity                   — Complexity analysis only (stub)
@@ -40,7 +45,8 @@ from app.models.review import (
     FunctionComplexity,
     SecurityFinding,
 )
-from app.services.complexity import ComplexityService
+from app.services.complexity import ComplexityService, ComplexityVisualizer
+from app.services.complexity.summary_generator import generate_summary
 from app.services.pipeline import ReviewPipeline, _review_store
 from app.services.security.report_generator import SecurityReportGenerator
 
@@ -255,37 +261,38 @@ async def review_complexity(request: CodeReviewRequest) -> ComplexityResult:
 
 @router.post(
     "/analyze/complexity",
-    response_model=list[FunctionComplexity],
-    summary="Per-function complexity analysis",
+    response_model=ComplexityResult,
+    summary="Per-function complexity analysis with visualization",
     description=(
         "Analyzes time and space complexity for each function in the submitted "
         "code using AST pattern matching with LLM fallback for ambiguous cases. "
+        "Returns per-function annotations, visualization-ready chart data with "
+        "numeric complexity scores, and an LLM-generated executive summary. "
         "Faster and cheaper than a full review when you only need complexity."
     ),
 )
 @limiter.limit("20/minute")
 async def analyze_complexity(
     request: Request, review_request: CodeReviewRequest
-) -> list[FunctionComplexity]:
+) -> ComplexityResult:
     """
-    Per-function complexity analysis endpoint (Day 13).
+    Per-function complexity analysis endpoint (Day 15).
 
     Uses a hybrid approach:
         - AST pattern matching for 90% of cases (free, <10ms)
         - LLM fallback for low-confidence functions (~$0.002/call)
 
-    Returns a FunctionComplexity for each function in the code with:
-        - function_name, line_start, line_end
-        - time_complexity (Big-O)
-        - space_complexity (Big-O)
-        - confidence level (high/medium/low)
-        - reasoning explanation
+    Returns a ComplexityResult with:
+        - function_complexities:       per-function annotations
+        - optimization_opportunities:  brute-force → optimal suggestions
+        - visualization:               chart-ready data with numeric scores
+        - summary:                     LLM-generated executive summary
 
     Args:
         review_request: Code review request with code and language.
 
     Returns:
-        List of FunctionComplexity objects, one per function found.
+        ComplexityResult with visualization data and narrative summary.
     """
     try:
         logger.info(
@@ -293,14 +300,50 @@ async def analyze_complexity(
             review_request.language,
             len(review_request.code),
         )
-        results = await _complexity_service.analyze(
-            review_request.code, review_request.language
+        function_complexities, optimization_opportunities = (
+            await _complexity_service.analyze(
+                review_request.code, review_request.language
+            )
         )
+
+        # Build visualization data (sync, <1ms)
+        visualization = ComplexityVisualizer.build(function_complexities)
+
+        # Determine overall complexity from functions
+        if function_complexities:
+            from app.services.complexity.complexity_visualizer import complexity_to_score
+            worst = max(
+                function_complexities,
+                key=lambda f: complexity_to_score(f.time_complexity),
+            )
+            overall_time = worst.time_complexity
+            overall_space = worst.space_complexity
+        else:
+            overall_time = "O(1)"
+            overall_space = "O(1)"
+
+        result = ComplexityResult(
+            time_complexity=overall_time,
+            space_complexity=overall_space,
+            explanation="Per-function complexity analysis.",
+            function_complexities=function_complexities,
+            optimization_opportunities=optimization_opportunities,
+            visualization=visualization,
+        )
+
+        # Generate narrative summary (async LLM)
+        try:
+            result.summary = await generate_summary(result)
+        except Exception as exc:
+            logger.warning("Summary generation failed: %s", exc)
+
         logger.info(
-            "Complexity analysis complete — %d function(s) analyzed",
-            len(results),
+            "Complexity analysis complete — %d function(s), viz=%s, summary=%s",
+            len(function_complexities),
+            "yes" if visualization else "no",
+            "yes" if result.summary else "no",
         )
-        return results
+        return result
     except Exception as exc:
         logger.error("Complexity analysis failed: %s", exc, exc_info=True)
         raise HTTPException(
@@ -308,3 +351,46 @@ async def analyze_complexity(
             detail=f"Analysis error: {str(exc)}",
         ) from exc
 
+
+@router.get(
+    "/analyze/complexity/summary",
+    response_class=PlainTextResponse,
+    summary="Complexity summary only",
+    description=(
+        "Returns just the plain-English executive summary from the most "
+        "recent complexity analysis. Run POST /api/v1/analyze/complexity "
+        "first to generate the summary."
+    ),
+)
+async def get_complexity_summary() -> PlainTextResponse:
+    """
+    Complexity summary endpoint (Day 15).
+
+    Returns the LLM-generated narrative summary from the most recent
+    full review. The summary is a 3–4 sentence plain-English paragraph
+    suitable for display in the frontend.
+
+    Returns:
+        Plain-text complexity summary.
+
+    Raises:
+        404 if no review has been run yet.
+    """
+    review = _review_store.get("latest")
+    if review is None or review.complexity is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No complexity analysis found. Run a review first via "
+                "POST /api/v1/review or POST /api/v1/analyze/complexity."
+            ),
+        )
+
+    summary = review.complexity.summary
+    if not summary:
+        raise HTTPException(
+            status_code=404,
+            detail="Complexity summary not yet generated for this review.",
+        )
+
+    return PlainTextResponse(content=summary, media_type="text/plain")

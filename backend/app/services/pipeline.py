@@ -1,5 +1,5 @@
 """
-CoDude — Review Pipeline (Day 14 — Brute-Force Detection & Optimal Solutions)
+CoDude — Review Pipeline (Day 15 — Visualization Data & Narrative Summary)
 
 Fan-out, fan-in architecture that unifies all bug detection sources
 (AST + regex + LLM) into a single pipeline with:
@@ -23,6 +23,11 @@ Day 14 additions:
     - BruteForceDetector identifies suboptimal algorithm patterns
     - SolutionGenerator produces targeted LLM-powered optimisations
     - OptimizationOpportunity objects attached to ComplexityResult
+
+Day 15 additions:
+    - ComplexityVisualizer converts analysis to frontend-ready chart data
+    - SummaryGenerator produces LLM-powered executive narrative summaries
+    - ComplexityVisualization + summary attached to ComplexityResult
 
 Pipeline order:
     ┌─────────────────────────────────────────────────────────────────┐
@@ -73,7 +78,8 @@ from app.services.prompts.structured_output import (
     ComplexityAnalysisSchema,
     SecurityReviewSchema,
 )
-from app.services.complexity import ComplexityService
+from app.services.complexity import ComplexityService, ComplexityVisualizer
+from app.services.complexity.summary_generator import generate_summary
 from app.services.security.exploit_explainer import ExploitExplainer
 from app.services.security.owasp_scanner import OWASPScanner
 from app.services.static_analysis import (
@@ -297,6 +303,15 @@ class ReviewPipeline:
                 len(optimization_opportunities),
             )
 
+        # ── Step 7c: Build visualization data (Day 15, sync, <1ms) ────────
+        visualization = ComplexityVisualizer.build(function_complexities)
+        if visualization:
+            logger.info(
+                "Pipeline: visualization — %d function(s), scores=%s",
+                len(visualization.labels),
+                visualization.complexity_scores,
+            )
+
         complexity = ComplexityResult(
             time_complexity=complexity_result.time_complexity,
             space_complexity=complexity_result.space_complexity,
@@ -304,7 +319,18 @@ class ReviewPipeline:
             brute_force_alternative=complexity_result.suggestion,
             function_complexities=function_complexities,
             optimization_opportunities=optimization_opportunities,
+            visualization=visualization,
         )
+
+        # ── Step 7d: Generate narrative summary (Day 15, async LLM) ──────
+        try:
+            complexity.summary = await generate_summary(complexity)
+            logger.info(
+                "Pipeline: summary generated — %d chars",
+                len(complexity.summary),
+            )
+        except Exception as exc:
+            logger.warning("Pipeline: summary generation failed: %s", exc)
 
         # Compute score and summary
         score = self._compute_score(all_bugs, security, complexity)
