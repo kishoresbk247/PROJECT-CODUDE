@@ -1,0 +1,78 @@
+/* ── FindingCard Styles ─────────────────────────────────────────────────── */
+
+.finding-card {
+  padding: 18px;
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.finding-card:hover {
+  border-color: rgba(99, 102, 241, 0.2);
+  transform: translateY(-1px);
+}
+
+.finding-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.finding-card__badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.finding-card__owasp {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--color-border);
+  border-radius: 100px;
+}
+
+.finding-card__jump-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--color-accent-primary);
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.finding-card__jump-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
+}
+
+.finding-card__message {
+  font-size: 14px;
+  color: var(--color-text-primary);
+  margin-bottom: 8px;
+  line-height: 1.6;
+}
+
+.finding-card__suggestion {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  padding: 10px 12px;
+  background: rgba(99, 102, 241, 0.04);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-accent-primary);
+}
