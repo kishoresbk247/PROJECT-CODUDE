@@ -1,8 +1,9 @@
 /**
- * ResultsTabs.jsx — Tabbed interface for review results
+ * ResultsTabs.jsx — Tabbed interface for review results (Day 17 update)
  *
- * Four tabs: Overview, Bugs, Security, Complexity.
- * Each tab header shows a count badge with color-coded severity summary.
+ * Day 17 changes:
+ *   ✅ Each tab uses <EmptyState> component with custom per-tab message
+ *      instead of a plain "No X detected" div
  *
  * Props:
  *   result       — the full CodeReviewResponse object
@@ -13,13 +14,14 @@ import { useState } from 'react';
 import FindingCard from './FindingCard';
 import ScoreGauge from './ScoreGauge';
 import ComplexityChart from './ComplexityChart';
+import EmptyState from './EmptyState';
 import './ResultsTabs.css';
 
 const TABS = [
-  { key: 'overview',   label: 'Overview',    icon: '📊' },
-  { key: 'bugs',       label: 'Bugs',        icon: '🐛' },
-  { key: 'security',   label: 'Security',    icon: '🔒' },
-  { key: 'complexity', label: 'Complexity',  icon: '⚡' },
+  { key: 'overview',   label: 'Overview',   icon: '📊' },
+  { key: 'bugs',       label: 'Bugs',       icon: '🐛' },
+  { key: 'security',   label: 'Security',   icon: '🔒' },
+  { key: 'complexity', label: 'Complexity', icon: '⚡' },
 ];
 
 function countBySeverity(items = []) {
@@ -35,9 +37,9 @@ function SeverityDots({ items }) {
   return (
     <div className="tabs__severity-dots">
       {counts.critical > 0 && <span className="dot dot--critical">{counts.critical}</span>}
-      {counts.high > 0 && <span className="dot dot--high">{counts.high}</span>}
-      {counts.medium > 0 && <span className="dot dot--medium">{counts.medium}</span>}
-      {counts.low > 0 && <span className="dot dot--low">{counts.low}</span>}
+      {counts.high     > 0 && <span className="dot dot--high">{counts.high}</span>}
+      {counts.medium   > 0 && <span className="dot dot--medium">{counts.medium}</span>}
+      {counts.low      > 0 && <span className="dot dot--low">{counts.low}</span>}
     </div>
   );
 }
@@ -47,27 +49,28 @@ export default function ResultsTabs({ result, onJumpToLine }) {
 
   if (!result) return null;
 
-  const bugs = result.bugs || [];
-  const security = result.security || [];
-  const complexity = result.complexity;
+  const bugs            = result.bugs || [];
+  const security        = result.security || [];
+  const complexity      = result.complexity;
   const complexityScores = complexity?.complexity_scores || [];
 
   function getTabCount(key) {
-    if (key === 'bugs') return bugs.length;
-    if (key === 'security') return security.length;
+    if (key === 'bugs')       return bugs.length;
+    if (key === 'security')   return security.length;
     if (key === 'complexity') return complexityScores.length;
     return null;
   }
 
   function getTabItems(key) {
-    if (key === 'bugs') return bugs;
+    if (key === 'bugs')     return bugs;
     if (key === 'security') return security;
     return [];
   }
 
   return (
     <div className="results-tabs" id="results-tabs">
-      {/* Tab Headers */}
+
+      {/* ── Tab Headers ── */}
       <div className="results-tabs__header">
         {TABS.map((tab) => {
           const count = getTabCount(tab.key);
@@ -91,8 +94,9 @@ export default function ResultsTabs({ result, onJumpToLine }) {
         })}
       </div>
 
-      {/* Tab Content */}
+      {/* ── Tab Content ── */}
       <div className="results-tabs__content">
+
         {/* Overview */}
         {activeTab === 'overview' && (
           <div className="tab-panel animate-fade-in" id="panel-overview">
@@ -120,13 +124,11 @@ export default function ResultsTabs({ result, onJumpToLine }) {
           </div>
         )}
 
-        {/* Bugs */}
+        {/* Bugs — Day 17: uses EmptyState */}
         {activeTab === 'bugs' && (
           <div className="tab-panel animate-fade-in" id="panel-bugs">
             {bugs.length === 0 ? (
-              <div className="tab-panel__empty">
-                <span>✅</span> No bugs detected
-              </div>
+              <EmptyState type="bugs" />
             ) : (
               <div className="findings-list">
                 {bugs.map((bug, i) => (
@@ -142,13 +144,11 @@ export default function ResultsTabs({ result, onJumpToLine }) {
           </div>
         )}
 
-        {/* Security */}
+        {/* Security — Day 17: uses EmptyState */}
         {activeTab === 'security' && (
           <div className="tab-panel animate-fade-in" id="panel-security">
             {security.length === 0 ? (
-              <div className="tab-panel__empty">
-                <span>✅</span> No security issues found
-              </div>
+              <EmptyState type="security" />
             ) : (
               <div className="findings-list">
                 {security.map((sec, i) => (
@@ -164,34 +164,40 @@ export default function ResultsTabs({ result, onJumpToLine }) {
           </div>
         )}
 
-        {/* Complexity */}
-        {activeTab === 'complexity' && complexity && (
+        {/* Complexity — Day 17: uses EmptyState when no complexity data */}
+        {activeTab === 'complexity' && (
           <div className="tab-panel animate-fade-in" id="panel-complexity">
-            <div className="complexity-overview glass">
-              <div className="complexity-metrics">
-                <div className="complexity-metric">
-                  <span className="complexity-label">Time</span>
-                  <span className="complexity-value gradient-text">
-                    {complexity.time_complexity}
-                  </span>
+            {!complexity ? (
+              <EmptyState type="complexity" />
+            ) : (
+              <>
+                <div className="complexity-overview glass">
+                  <div className="complexity-metrics">
+                    <div className="complexity-metric">
+                      <span className="complexity-label">Time</span>
+                      <span className="complexity-value gradient-text">
+                        {complexity.time_complexity}
+                      </span>
+                    </div>
+                    <div className="complexity-metric">
+                      <span className="complexity-label">Space</span>
+                      <span className="complexity-value gradient-text">
+                        {complexity.space_complexity}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="complexity-explanation">{complexity.explanation}</p>
                 </div>
-                <div className="complexity-metric">
-                  <span className="complexity-label">Space</span>
-                  <span className="complexity-value gradient-text">
-                    {complexity.space_complexity}
-                  </span>
-                </div>
-              </div>
-              <p className="complexity-explanation">{complexity.explanation}</p>
-            </div>
 
-            {complexityScores.length > 0 && (
-              <div className="complexity-chart-wrapper glass">
-                <h4 className="complexity-chart__title">
-                  Per-Function Complexity Scores
-                </h4>
-                <ComplexityChart data={complexityScores} />
-              </div>
+                {complexityScores.length > 0 && (
+                  <div className="complexity-chart-wrapper glass">
+                    <h4 className="complexity-chart__title">
+                      Per-Function Complexity Scores
+                    </h4>
+                    <ComplexityChart data={complexityScores} />
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

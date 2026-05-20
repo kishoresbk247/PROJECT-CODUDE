@@ -186,3 +186,62 @@ a:hover {
 .cm-activeLine {
   background-color: rgba(99, 102, 241, 0.06) !important;
 }
+
+/* ── Responsive Breakpoint Utilities (Day 17) ─────────────────────────────── */
+
+/* Stack panels vertically on mobile (< 768px) */
+@media (max-width: 768px) {
+  /* Panels that are side-by-side on desktop stack vertically */
+  [class*="review-split"],
+  [class*="split-layout"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Reduce heading sizes globally */
+  h1 { font-size: clamp(24px, 6vw, 36px); }
+  h2 { font-size: clamp(20px, 5vw, 28px); }
+  h3 { font-size: clamp(16px, 4vw, 22px); }
+}
+
+/* Extra small (375px — iPhone SE) */
+@media (max-width: 400px) {
+  body { font-size: 14px; }
+
+  .glass {
+    border-radius: var(--radius-md);
+  }
+}
+
+/* ── Skeleton shimmer (globally available) ────────────────────────────────── */
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: -600px 0; }
+  100% { background-position: 600px 0; }
+}
+
+.skeleton-pulse {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.10) 40%,
+    rgba(255, 255, 255, 0.04) 80%
+  );
+  background-size: 600px 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* ── Accessibility: screen-reader only (globally available) ──────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+

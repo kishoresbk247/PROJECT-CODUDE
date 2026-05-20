@@ -1,27 +1,28 @@
 /**
- * ReviewPage.jsx — Code Review Page (Day 16 refactor)
+ * ReviewPage.jsx — Code Review Page (Day 17 — Polish)
  *
- * Split-panel layout:
- *   Left  — CodeEditor with language selector & submit button
- *   Right — ResultsTabs with ScoreGauge at the top
+ * New on Day 17:
+ *   ✅ Uses useReview() custom hook — no inline state management
+ *   ✅ LoadingSkeleton shown during isLoading (2s artificial delay)
+ *   ✅ ErrorBanner with dismiss + retry callbacks
+ *   ✅ EmptyState shown per tab when findings array is empty
+ *   ✅ LanguageSelector component replaces inline <select>
+ *   ✅ Cmd/Ctrl + Enter keyboard shortcut triggers review
+ *   ✅ Responsive: stacks vertically on mobile (< 768px via CSS)
  *
- * Hardcodes a mock CodeReviewResponse to populate all panels.
- * API wiring comes on Day 18.
+ * API wiring (real axios POST) comes on Day 18.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import CodeEditor from '../components/CodeEditor';
 import ResultsTabs from '../components/ResultsTabs';
-import MOCK_REVIEW_RESPONSE from '../data/mockReviewData';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import ErrorBanner from '../components/ErrorBanner';
+import LanguageSelector, { LANGUAGES } from '../components/LanguageSelector';
+import { useReview } from '../hooks/useReview';
 import './ReviewPage.css';
 
-const LANGUAGES = [
-  { value: 'python', label: 'Python', icon: '🐍' },
-  { value: 'javascript', label: 'JavaScript', icon: '🟨' },
-  { value: 'java', label: 'Java', icon: '☕' },
-  { value: 'cpp', label: 'C++', icon: '⚙️' },
-];
-
+/* ── Sample code per language ─────────────────────────────────────────────── */
 const SAMPLE_CODE = {
   python: `def bubble_sort(arr):
     n = len(arr)
@@ -90,36 +91,48 @@ int main() {
     bubbleSort(v);
     return 0;
 }`,
+
+  auto: `# Auto-detect mode — paste any code below
+def hello():
+    print("Hello, World!")
+`,
 };
 
+/* ── Component ─────────────────────────────────────────────────────────────── */
 export default function ReviewPage() {
-  const [language, setLanguage] = useState('python');
-  const [code, setCode] = useState(SAMPLE_CODE.python);
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(MOCK_REVIEW_RESPONSE);
-  const [error, setError] = useState(null);
-  const editorViewRef = useRef(null);
+  const [language, setLanguage]   = useState('python');
+  const [code, setCode]           = useState(SAMPLE_CODE.python);
+  const editorViewRef             = useRef(null);
 
-  const handleLanguageChange = useCallback((e) => {
-    const lang = e.target.value;
-    setLanguage(lang);
-    setCode(SAMPLE_CODE[lang] || '');
+  // ── Day 17: useReview custom hook ──────────────────────────────────────
+  const { review, isLoading, error, result, clearError } = useReview();
+
+  // ── Language change ─────────────────────────────────────────────────────
+  const handleLanguageChange = useCallback((newLang) => {
+    setLanguage(newLang);
+    setCode(SAMPLE_CODE[newLang] || '');
   }, []);
 
-  const handleSubmit = useCallback(async () => {
-    if (!code.trim()) {
-      setError('Please enter some code to review.');
-      return;
+  // ── Submit / review ─────────────────────────────────────────────────────
+  const handleSubmit = useCallback(() => {
+    review(code, language);
+  }, [code, language, review]);
+
+  // ── Keyboard shortcut: Cmd/Ctrl + Enter ────────────────────────────────
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (!isLoading && code.trim()) {
+          handleSubmit();
+        }
+      }
     }
-    setLoading(true);
-    setError(null);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleSubmit, isLoading, code]);
 
-    // Simulate API call — will be replaced with real axios call on Day 18
-    await new Promise((r) => setTimeout(r, 1500));
-    setResult(MOCK_REVIEW_RESPONSE);
-    setLoading(false);
-  }, [code]);
-
+  // ── Jump to line in editor ──────────────────────────────────────────────
   const handleJumpToLine = useCallback((line) => {
     const view = editorViewRef.current;
     if (!view) return;
@@ -131,26 +144,45 @@ export default function ReviewPage() {
     view.focus();
   }, []);
 
-  const fileExt = language === 'cpp' ? 'cpp' : language === 'java' ? 'java' : language === 'javascript' ? 'js' : 'py';
+  // ── Derived UI helpers ──────────────────────────────────────────────────
+  const fileExt =
+    language === 'cpp' ? 'cpp'
+    : language === 'java' ? 'java'
+    : language === 'javascript' ? 'js'
+    : language === 'auto' ? 'txt'
+    : 'py';
 
+  const shortcutHint =
+    typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
+      ? '⌘ + Enter'
+      : 'Ctrl + Enter';
+
+  /* ── Render ─────────────────────────────────────────────────────────── */
   return (
     <div className="review-page">
-      {/* Header */}
+      {/* ── Header ── */}
       <div className="review-header animate-slide-up">
         <h1 className="review-title">
           Code <span className="gradient-text">Review</span>
         </h1>
         <p className="review-subtitle">
-          Paste your code below, select a language, and get instant AI-powered
+          Paste your code, select a language, and get instant AI-powered
           feedback on bugs, security, and complexity.
         </p>
+        <div className="review-shortcut-hint" aria-label={`Keyboard shortcut: ${shortcutHint} to run review`}>
+          <kbd className="kbd">{shortcutHint}</kbd>
+          <span>to run review</span>
+        </div>
       </div>
 
-      {/* Split Layout */}
+      {/* ── Split Layout ── */}
       <div className="review-split">
+
         {/* ── Left Panel: Code Editor ── */}
         <div className="review-panel review-panel--editor animate-slide-up" style={{ animationDelay: '100ms' }}>
           <div className="editor-panel glass">
+
+            {/* Toolbar */}
             <div className="editor-toolbar">
               <div className="toolbar-left">
                 <div className="toolbar-dots">
@@ -161,43 +193,36 @@ export default function ReviewPage() {
                 <span className="toolbar-filename">code.{fileExt}</span>
               </div>
               <div className="toolbar-right">
-                <select
-                  id="language-selector"
-                  className="language-select"
-                  value={language}
-                  onChange={handleLanguageChange}
-                >
-                  {LANGUAGES.map((l) => (
-                    <option key={l.value} value={l.value}>
-                      {l.icon} {l.label}
-                    </option>
-                  ))}
-                </select>
+                {/* Day 17: LanguageSelector component */}
+                <LanguageSelector value={language} onChange={handleLanguageChange} />
               </div>
             </div>
 
+            {/* Editor */}
             <div className="editor-wrapper" id="code-editor">
               <CodeEditor
                 value={code}
                 onChange={setCode}
-                language={language}
-                height="calc(100vh - 340px)"
+                language={language === 'auto' ? 'python' : language}
+                height="calc(100vh - 360px)"
                 onEditorReady={(view) => { editorViewRef.current = view; }}
               />
             </div>
 
+            {/* Footer */}
             <div className="editor-footer">
               <div className="char-count">
-                {code.length} chars · {code.split('\n').length} lines
+                {code.length.toLocaleString()} chars · {code.split('\n').length} lines
               </div>
               <button
                 className="btn btn-primary btn-submit"
                 onClick={handleSubmit}
-                disabled={loading || !code.trim()}
+                disabled={isLoading || !code.trim()}
                 id="submit-review-button"
+                title={`Review code (${shortcutHint})`}
               >
-                {loading ? (
-                  <><span className="spinner" /> Analyzing...</>
+                {isLoading ? (
+                  <><span className="spinner" /> Analyzing…</>
                 ) : (
                   <span>⚡ Review Code</span>
                 )}
@@ -208,22 +233,31 @@ export default function ReviewPage() {
 
         {/* ── Right Panel: Results ── */}
         <div className="review-panel review-panel--results animate-slide-up" style={{ animationDelay: '200ms' }}>
-          {error && (
-            <div className="error-banner" id="error-message">
-              <span>⚠️</span>
-              <span>{error}</span>
-            </div>
+
+          {/* Day 17: ErrorBanner component */}
+          <ErrorBanner
+            error={error}
+            onDismiss={clearError}
+            onRetry={() => { clearError(); handleSubmit(); }}
+          />
+
+          {/* Day 17: LoadingSkeleton while fetching */}
+          {isLoading && <LoadingSkeleton cardCount={3} />}
+
+          {/* Results tabs when done */}
+          {!isLoading && result && (
+            <ResultsTabs result={result} onJumpToLine={handleJumpToLine} />
           )}
 
-          {result ? (
-            <ResultsTabs result={result} onJumpToLine={handleJumpToLine} />
-          ) : (
-            <div className="results-placeholder glass">
+          {/* Placeholder when nothing has been run yet */}
+          {!isLoading && !result && !error && (
+            <div className="results-placeholder glass" id="results-placeholder">
               <div className="results-placeholder__icon">🔍</div>
               <h3 className="results-placeholder__title">Ready to Analyze</h3>
               <p className="results-placeholder__text">
-                Write or paste code in the editor, then click
-                <strong> ⚡ Review Code</strong> to see results here.
+                Write or paste code in the editor, then click{' '}
+                <strong>⚡ Review Code</strong> (or press{' '}
+                <kbd className="kbd kbd--inline">{shortcutHint}</kbd>) to see results here.
               </p>
             </div>
           )}

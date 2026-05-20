@@ -1,0 +1,59 @@
+/* ── LanguageSelector.css — Styled language dropdown (Day 17) ────────────── */
+
+.lang-selector {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+
+/* Emoji icon on the left */
+.lang-selector__icon {
+  position: absolute;
+  left: 10px;
+  font-size: 15px;
+  pointer-events: none;
+  z-index: 1;
+  line-height: 1;
+}
+
+/* The actual <select> */
+.lang-selector__select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 7px 36px 7px 34px; /* left: room for icon, right: room for chevron */
+  font-size: 13px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  min-width: 148px;
+}
+
+.lang-selector__select:focus {
+  outline: none;
+  border-color: var(--color-accent-primary);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
+}
+
+.lang-selector__select:hover {
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.lang-selector__select option {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+/* Custom chevron arrow */
+.lang-selector__chevron {
+  position: absolute;
+  right: 10px;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
