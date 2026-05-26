@@ -45,10 +45,15 @@ setup_rate_limiter(app)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:3000",   # Create React App / Next.js dev
+        "http://localhost:5173",   # Vite dev server (primary)
+        "http://localhost:5174",   # Vite dev server (fallback port)
+        "http://127.0.0.1:5173",   # Localhost alias
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*", "X-Request-ID", "Content-Type", "Authorization"],
 )
 
 

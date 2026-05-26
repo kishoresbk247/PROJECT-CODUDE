@@ -1,17 +1,19 @@
 /**
- * ReviewPage.jsx — Code Review Page (Day 17 — Polish)
+ * ReviewPage.jsx — Code Review Page (Day 18 — API Integration)
  *
- * New on Day 17:
- *   ✅ Uses useReview() custom hook — no inline state management
- *   ✅ LoadingSkeleton shown during isLoading (2s artificial delay)
- *   ✅ ErrorBanner with dismiss + retry callbacks
- *   ✅ EmptyState shown per tab when findings array is empty
- *   ✅ LanguageSelector component replaces inline <select>
- *   ✅ Cmd/Ctrl + Enter keyboard shortcut triggers review
- *   ✅ Responsive: stacks vertically on mobile (< 768px via CSS)
+ * Day 18 changes:
+ *   ✅ useReview() now calls real FastAPI backend (no mock data)
+ *   ✅ AbortController cancels in-flight requests on rapid re-submission
+ *   ✅ cancel() destructured and called in useEffect cleanup on unmount
+ *        → prevents "state update on unmounted component" React warnings
+ *   ✅ VITE_API_BASE_URL drives the axios baseURL (frontend/.env)
  *
- * API wiring (real axios POST) comes on Day 18.
+ * Previous (Day 17):
+ *   ✅ LoadingSkeleton, ErrorBanner, EmptyState, LanguageSelector
+ *   ✅ Ctrl/Cmd + Enter keyboard shortcut
+ *   ✅ Responsive layout (< 768px stack)
  */
+
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import CodeEditor from '../components/CodeEditor';
@@ -104,8 +106,16 @@ export default function ReviewPage() {
   const [code, setCode]           = useState(SAMPLE_CODE.python);
   const editorViewRef             = useRef(null);
 
-  // ── Day 17: useReview custom hook ──────────────────────────────────────
-  const { review, isLoading, error, result, clearError } = useReview();
+  // ── Day 18: useReview custom hook (with cancel for unmount cleanup) ──────
+  const { review, isLoading, error, result, clearError, cancel } = useReview();
+
+  // ── Day 18: Cancel in-flight request on unmount ─────────────────────────
+  // Prevents "Can't perform a React state update on an unmounted component"
+  // if the user navigates away while an LLM review is in progress.
+  useEffect(() => {
+    return () => cancel();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Language change ─────────────────────────────────────────────────────
   const handleLanguageChange = useCallback((newLang) => {
